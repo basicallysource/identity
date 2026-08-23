@@ -1,0 +1,6 @@
+# Machine-local, private context. Never committed.
+AGENTS.local.md
+*.local.md
+
+.env
+*.env
