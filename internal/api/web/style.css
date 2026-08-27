@@ -52,6 +52,7 @@ code, .mono {
   font-family: var(--mono);
   font-size: 0.86em;
 }
+code { overflow-wrap: anywhere; }
 
 button {
   font: inherit;
@@ -60,6 +61,7 @@ button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 0.45rem 0.9rem;
+  min-height: 2.25rem;
   cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease;
 }
@@ -75,16 +77,44 @@ input[type="text"] {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 0.45rem 0.6rem;
+  min-height: 2.25rem;
 }
 input[type="text"]:focus { outline: none; border-color: var(--muted); }
 
 table { width: 100%; border-collapse: collapse; margin-top: 0.25rem; }
 th, td { text-align: left; padding: 0.4rem 0.6rem 0.4rem 0;
-         border-bottom: 1px solid var(--line); }
+         border-bottom: 1px solid var(--line); white-space: nowrap; }
+td:first-child { white-space: normal; }
 th { font-weight: 500; color: var(--muted); font-size: 0.82rem; }
+.table-wrap { width: 100%; overflow-x: auto; }
 
 .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-.stack { display: flex; flex-direction: column; gap: 0.75rem; }
+.row input[type="text"] { flex: 1 1 8rem; min-width: 0; }
+.stack { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1.5rem; }
+
+/* The sign-in choices: a narrow column of full-width provider buttons. */
+.signin {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 20rem;
+  margin-top: 0.25rem;
+}
+.signin > button { width: 100%; }
+
+button.provider {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  min-height: 2.75rem;
+  padding: 0.55rem 1rem;
+}
+
+svg.icon { width: 1.15rem; height: 1.15rem; flex: none; }
+
+.identity { display: flex; align-items: center; gap: 0.5rem; }
 
 .device-code {
   font-family: var(--mono);
@@ -94,5 +124,7 @@ th { font-weight: 500; color: var(--muted); font-size: 0.82rem; }
   border-radius: var(--radius);
   padding: 0.6rem 1rem;
   display: inline-block;
+  align-self: flex-start;
+  max-width: 100%;
   user-select: all;
 }
