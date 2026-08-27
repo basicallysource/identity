@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>identity</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<h1>identity</h1>
+<p class="muted">One account across Basically's services. Sign in with GitHub
+or Discord; link both to the same account.</p>
+
+<div id="app" class="stack" style="margin-top:1.5rem"></div>
+
+<script>
+const app = document.getElementById('app');
+const token = () => sessionStorage.getItem('identity_token');
+
+const api = (method, path, body) => fetch(path, {
+  method,
+  headers: Object.assign(
+    {'Content-Type': 'application/json'},
+    token() ? {'Authorization': 'Bearer ' + token()} : {}),
+  body: body === undefined ? undefined : JSON.stringify(body),
+});
+
+const el = (tag, attrs, ...children) => {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === 'onclick') node.addEventListener('click', v);
+    else if (k === 'class') node.className = v;
+    else node.setAttribute(k, v);
+  }
+  for (const child of children) {
+    node.append(child);
+  }
+  return node;
+};
+
+const show = (...nodes) => { app.replaceChildren(...nodes); };
+
+// -- signed out ------------------------------------------------------------
+
+function signedOut(message) {
+  const nodes = [];
+  if (message) nodes.push(el('p', {class: 'error'}, message));
+  nodes.push(el('div', {class: 'row'},
+    el('button', {class: 'primary', onclick: startGitHub}, 'Sign in with GitHub'),
+    el('button', {onclick: startDiscord}, 'Sign in with Discord')));
+  show(...nodes);
+}
+
+async function startGitHub(linking) {
+  const start = await api('POST', '/signin/github/start');
+  if (!start.ok) return fail(start);
+  const device = await start.json();
+
+  show(
+    el('p', {}, 'Go to ', el('a', {href: device.verification_uri, target: '_blank'},
+      device.verification_uri), ' and enter this code:'),
+    el('div', {class: 'device-code'}, device.user_code),
+    el('p', {class: 'muted'}, 'Waiting for GitHub…'),
+    el('button', {onclick: () => render()}, 'Cancel'));
+
+  const interval = (device.interval || 5) + 1;
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, interval * 1000));
+    const finish = await api('POST', '/signin/github/finish',
+      {device_code: device.device_code});
+    if (finish.status === 202) continue;
+    if (finish.status === 201) {
+      const minted = await finish.json();
+      sessionStorage.setItem('identity_token', minted.token);
+      return render();
+    }
+    if (finish.ok) return render();  // a completed link answers 200
+    return fail(finish);
+  }
+}
+
+async function startDiscord() {
+  const start = await api('POST', '/signin/discord/start');
+  if (!start.ok) return fail(start);
+  const body = await start.json();
+  location.href = body.url;
+}
+
+async function fail(response) {
+  let message = 'something went wrong';
+  try { message = (await response.json()).error || message; } catch {}
+  if (token()) render(message); else signedOut(message);
+}
+
+// -- signed in -------------------------------------------------------------
+
+async function signedIn(message) {
+  const who = await api('GET', '/v1/whoami');
+  if (who.status === 401) {
+    sessionStorage.removeItem('identity_token');
+    return signedOut('that session no longer works; sign in again');
+  }
+  if (!who.ok) return fail(who);
+  const me = await who.json();
+
+  const tokens = await api('GET', '/v1/tokens');
+  const tokenRows = tokens.ok ? (await tokens.json()).tokens : [];
+
+  const nodes = [];
+  if (message) nodes.push(el('p', {class: 'error'}, message));
+
+  nodes.push(el('p', {},
+    'Signed in as ', el('strong', {}, me.handle), ' ',
+    el('span', {class: 'muted mono'}, '(' + me.account + ')')));
+
+  // Identities, and the link buttons for whichever provider is missing.
+  const linked = new Set(me.identities.map(i => i.provider));
+  const identitySection = [el('h2', {}, 'identities')];
+  for (const identity of me.identities) {
+    identitySection.push(el('p', {},
+      identity.provider + ': ', el('strong', {}, identity.handle)));
+  }
+  const linkButtons = [];
+  if (!linked.has('github'))
+    linkButtons.push(el('button', {onclick: () => startGitHub(true)}, 'Link GitHub'));
+  if (!linked.has('discord'))
+    linkButtons.push(el('button', {onclick: startDiscord}, 'Link Discord'));
+  if (linkButtons.length)
+    identitySection.push(el('div', {class: 'row'}, ...linkButtons));
+  nodes.push(...identitySection);
+
+  // Tokens.
+  nodes.push(el('h2', {}, 'tokens'));
+  const table = el('table', {},
+    el('tr', {}, el('th', {}, 'name'), el('th', {}, 'expires'), el('th', {}, '')));
+  for (const row of tokenRows) {
+    const expires = row.revoked ? 'revoked'
+      : row.expires_at ? new Date(row.expires_at).toLocaleDateString() : 'never';
+    table.append(el('tr', {},
+      el('td', {}, row.name + (row.current ? ' (this session)' : '')),
+      el('td', {class: 'muted'}, expires),
+      el('td', {}, row.revoked ? '' :
+        el('button', {class: 'danger', onclick: () => revoke(row.id)}, 'revoke'))));
+  }
+  nodes.push(table);
+
+  const nameInput = el('input', {type: 'text', placeholder: 'token name'});
+  nodes.push(el('div', {class: 'row'},
+    nameInput,
+    el('button', {onclick: () => mint(nameInput.value)}, 'New token'),
+    el('button', {onclick: signOut}, 'Sign out')));
+
+  show(...nodes);
+}
+
+async function mint(name) {
+  const response = await api('POST', '/v1/tokens', {name});
+  if (!response.ok) return fail(response);
+  const minted = await response.json();
+  await signedIn();
+  app.prepend(
+    el('p', {}, 'Copy it now; it is not shown again: ',
+      el('code', {}, minted.token)));
+}
+
+async function revoke(id) {
+  const response = await api('DELETE', '/v1/tokens/' + id);
+  if (!response.ok && response.status !== 404) return fail(response);
+  render();
+}
+
+function signOut() {
+  sessionStorage.removeItem('identity_token');
+  render();
+}
+
+function render(message) {
+  if (token()) signedIn(message); else signedOut(message);
+}
+
+render();
+</script>
+</body>
+</html>

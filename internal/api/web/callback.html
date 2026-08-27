@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>identity</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+{{if .Error}}
+<h1>sign-in failed</h1>
+<p class="error">{{.Error}}</p>
+<p><a href="/">Back</a></p>
+{{else}}
+<h1>signed in</h1>
+<p class="muted">Taking you back…</p>
+<script>
+{{if .Token}}
+sessionStorage.setItem('identity_token', {{.Token}});
+{{end}}
+location.replace('/');
+</script>
+{{end}}
+</body>
+</html>
