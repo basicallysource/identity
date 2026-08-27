@@ -52,8 +52,9 @@ func main() {
 			ClientID:     os.Getenv("IDENTITY_DISCORD_CLIENT_ID"),
 			ClientSecret: os.Getenv("IDENTITY_DISCORD_CLIENT_SECRET"),
 		},
-		BaseURL: baseURL,
-		Logger:  logger,
+		BaseURL:        baseURL,
+		ClientIPHeader: os.Getenv("IDENTITY_CLIENT_IP_HEADER"),
+		Logger:         logger,
 	}
 
 	httpServer := &http.Server{

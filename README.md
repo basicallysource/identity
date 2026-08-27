@@ -63,6 +63,7 @@ Configuration is environment variables:
 | `IDENTITY_GITHUB_CLIENT_ID` | — | a GitHub OAuth app with the device flow enabled |
 | `IDENTITY_DISCORD_CLIENT_ID` | — | a Discord application |
 | `IDENTITY_DISCORD_CLIENT_SECRET` | — | its secret |
+| `IDENTITY_CLIENT_IP_HEADER` | — | the header a proxy in front sets to the real client address, e.g. `CF-Connecting-IP`; empty trusts none |
 
 A provider with no credentials set is simply not offered. The Discord app must
 have `BASE_URL/signin/discord/callback` registered as a redirect, exactly.

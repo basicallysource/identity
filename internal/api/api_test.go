@@ -311,3 +311,27 @@ func TestTokenLifecycle(t *testing.T) {
 		t.Fatalf("a revoked token still answered %d", deadResp.StatusCode)
 	}
 }
+
+func TestClientAddrTrustsOnlyTheConfiguredHeader(t *testing.T) {
+	server := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.9:4242"
+	req.Header.Set("CF-Connecting-IP", "203.0.113.7")
+
+	// Unconfigured, the header is attacker-controlled noise.
+	if got := server.clientAddr(req); got != "10.0.0.9" {
+		t.Fatalf("unconfigured clientAddr = %q", got)
+	}
+
+	server.ClientIPHeader = "CF-Connecting-IP"
+	if got := server.clientAddr(req); got != "203.0.113.7" {
+		t.Fatalf("configured clientAddr = %q", got)
+	}
+
+	// A chain-style value names the client first.
+	server.ClientIPHeader = "X-Forwarded-For"
+	req.Header.Set("X-Forwarded-For", "198.51.100.4, 172.19.0.2")
+	if got := server.clientAddr(req); got != "198.51.100.4" {
+		t.Fatalf("chained clientAddr = %q", got)
+	}
+}

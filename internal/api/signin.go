@@ -36,7 +36,7 @@ func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "GitHub sign-in is not configured on this service")
 		return
 	}
-	if !s.throttle.allow(clientAddr(r), s.now()) {
+	if !s.throttle.allow(s.clientAddr(r), s.now()) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "too many sign-in attempts; wait a minute")
 		return
@@ -115,7 +115,7 @@ func (s *Server) discordStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "Discord sign-in is not configured on this service")
 		return
 	}
-	if !s.throttle.allow(clientAddr(r), s.now()) {
+	if !s.throttle.allow(s.clientAddr(r), s.now()) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "too many sign-in attempts; wait a minute")
 		return

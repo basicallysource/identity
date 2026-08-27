@@ -38,7 +38,11 @@ type Server struct {
 	// BaseURL is where this service lives publicly, for building the
 	// Discord redirect. No trailing slash.
 	BaseURL string
-	Logger  *slog.Logger
+	// ClientIPHeader is the header a proxy in front of this service sets to
+	// the real client address, e.g. CF-Connecting-IP. Empty trusts none,
+	// which is the only safe default -- any caller can send a header.
+	ClientIPHeader string
+	Logger         *slog.Logger
 	// Now is the clock, swapped in tests.
 	Now func() time.Time
 
@@ -225,8 +229,18 @@ func (t *throttle) allow(addr string, now time.Time) bool {
 	return true
 }
 
-// clientAddr is the throttle key: the peer address, without the port.
-func clientAddr(r *http.Request) string {
+// clientAddr is the throttle key: the configured proxy header when there is
+// one, else the peer address, without the port. Behind a proxy the peer is
+// the proxy, and a throttle keyed on it would be one bucket for everybody.
+func (s *Server) clientAddr(r *http.Request) string {
+	if s.ClientIPHeader != "" {
+		if value := r.Header.Get(s.ClientIPHeader); value != "" {
+			// An X-Forwarded-For style header may carry a chain; the
+			// client is the first hop.
+			value, _, _ = strings.Cut(value, ",")
+			return strings.TrimSpace(value)
+		}
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
