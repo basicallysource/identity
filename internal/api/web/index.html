@@ -17,6 +17,36 @@ or Discord; link both to the same account.</p>
 const app = document.getElementById('app');
 const token = () => sessionStorage.getItem('identity_token');
 
+// A service sending its browser here to sign in lands on /authorize with a
+// redirect_uri. The destination is stashed so it survives the Discord round
+// trip, and honored the moment a token exists.
+{
+  const query = new URLSearchParams(location.search);
+  if (query.get('redirect_uri')) {
+    sessionStorage.setItem('identity_authorize', JSON.stringify({
+      redirect_uri: query.get('redirect_uri'),
+      state: query.get('state') || '',
+    }));
+  }
+}
+
+async function maybeHandoff() {
+  const raw = sessionStorage.getItem('identity_authorize');
+  if (!raw || !token()) return false;
+  const {redirect_uri, state} = JSON.parse(raw);
+
+  const response = await api('POST', '/v1/handoff', {redirect_uri});
+  sessionStorage.removeItem('identity_authorize');
+  if (!response.ok) return false;
+  const {code} = await response.json();
+
+  show(el('p', {class: 'muted'}, 'Signing you in…'));
+  const glue = redirect_uri.includes('?') ? '&' : '?';
+  location.replace(redirect_uri + glue +
+    'code=' + encodeURIComponent(code) + '&state=' + encodeURIComponent(state));
+  return true;
+}
+
 const api = (method, path, body) => fetch(path, {
   method,
   headers: Object.assign(
@@ -174,7 +204,8 @@ function signOut() {
   render();
 }
 
-function render(message) {
+async function render(message) {
+  if (token() && await maybeHandoff()) return;
   if (token()) signedIn(message); else signedOut(message);
 }
 

@@ -42,7 +42,10 @@ type Server struct {
 	// the real client address, e.g. CF-Connecting-IP. Empty trusts none,
 	// which is the only safe default -- any caller can send a header.
 	ClientIPHeader string
-	Logger         *slog.Logger
+	// RedirectAllow is the URL prefixes a sign-in may be handed off to:
+	// the consuming services' callback origins. Empty disables handoff.
+	RedirectAllow []string
+	Logger        *slog.Logger
 	// Now is the clock, swapped in tests.
 	Now func() time.Time
 
@@ -57,8 +60,9 @@ type Server struct {
 }
 
 type pendingFlow struct {
-	accountID string
-	expires   time.Time
+	accountID   string
+	redirectURI string
+	expires     time.Time
 }
 
 // Handler builds the routes.
@@ -66,6 +70,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", s.page)
+	// The page itself handles an authorize request; the route exists so a
+	// consuming service has a name to send the browser to.
+	mux.HandleFunc("GET /authorize", s.page)
 	mux.HandleFunc("GET /style.css", s.stylesheet)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -77,6 +84,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /signin/discord/callback", s.discordCallback)
 
 	mux.HandleFunc("GET /v1/whoami", s.whoami)
+	mux.HandleFunc("POST /v1/handoff", s.handoff)
+	mux.HandleFunc("POST /v1/exchange", s.exchange)
 	mux.HandleFunc("GET /v1/tokens", s.listTokens)
 	mux.HandleFunc("POST /v1/tokens", s.mintToken)
 	mux.HandleFunc("DELETE /v1/tokens/{id}", s.revokeToken)
@@ -135,18 +144,23 @@ func (s *Server) authenticate(r *http.Request) (store.Account, store.Token, erro
 
 // remember stores one half-finished flow under a key.
 func (s *Server) remember(key, accountID string) {
+	s.rememberFlow(key, pendingFlow{accountID: accountID}, pendingFlowTTL)
+}
+
+func (s *Server) rememberFlow(key string, flow pendingFlow, ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pending == nil {
 		s.pending = make(map[string]pendingFlow)
 	}
 	now := s.now()
-	for k, flow := range s.pending {
-		if flow.expires.Before(now) {
+	for k, pending := range s.pending {
+		if pending.expires.Before(now) {
 			delete(s.pending, k)
 		}
 	}
-	s.pending[key] = pendingFlow{accountID: accountID, expires: now.Add(pendingFlowTTL)}
+	flow.expires = now.Add(ttl)
+	s.pending[key] = flow
 }
 
 // recall consumes a half-finished flow. The second result is whether the key

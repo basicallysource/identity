@@ -335,3 +335,75 @@ func TestClientAddrTrustsOnlyTheConfiguredHeader(t *testing.T) {
 		t.Fatalf("chained clientAddr = %q", got)
 	}
 }
+
+func TestHandoffAndExchange(t *testing.T) {
+	ts, server := newTestServer(t)
+	server.RedirectAllow = []string{"https://tracker.example/"}
+	minted := githubSignIn(t, ts)
+
+	callback := "https://tracker.example/auth/callback"
+
+	// A destination outside the allowlist is refused.
+	refused := post(t, ts.URL+"/v1/handoff", minted.Token,
+		`{"redirect_uri":"https://evil.example/steal"}`)
+	refused.Body.Close()
+	if refused.StatusCode != http.StatusForbidden {
+		t.Fatalf("foreign destination answered %d", refused.StatusCode)
+	}
+
+	// An allowed one mints a code, and the exchange mints a service token.
+	resp := post(t, ts.URL+"/v1/handoff", minted.Token,
+		fmt.Sprintf(`{"redirect_uri":%q}`, callback))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("handoff answered %d", resp.StatusCode)
+	}
+	code := decode[map[string]string](t, resp)["code"]
+
+	// Spending it correctly works exactly once.
+	exchanged := post(t, ts.URL+"/v1/exchange", "",
+		fmt.Sprintf(`{"code":%q,"redirect_uri":%q}`, code, callback))
+	if exchanged.StatusCode != http.StatusCreated {
+		t.Fatalf("exchange answered %d", exchanged.StatusCode)
+	}
+	service := decode[tokenResponse](t, exchanged)
+	if service.Account != minted.Account || service.Token == minted.Token {
+		t.Fatalf("exchange minted %+v for account %s", service, minted.Account)
+	}
+	again := post(t, ts.URL+"/v1/exchange", "",
+		fmt.Sprintf(`{"code":%q,"redirect_uri":%q}`, code, callback))
+	again.Body.Close()
+	if again.StatusCode != http.StatusForbidden {
+		t.Fatalf("a spent code answered %d", again.StatusCode)
+	}
+
+	// A code spent against the wrong redirect fails AND burns: any attempt
+	// consumes it, so a probing thief costs the person one retry, never a
+	// session.
+	resp = post(t, ts.URL+"/v1/handoff", minted.Token,
+		fmt.Sprintf(`{"redirect_uri":%q}`, callback))
+	second := decode[map[string]string](t, resp)["code"]
+	wrong := post(t, ts.URL+"/v1/exchange", "",
+		fmt.Sprintf(`{"code":%q,"redirect_uri":"https://tracker.example/other"}`, second))
+	wrong.Body.Close()
+	if wrong.StatusCode != http.StatusForbidden {
+		t.Fatalf("mismatched redirect answered %d", wrong.StatusCode)
+	}
+	burned := post(t, ts.URL+"/v1/exchange", "",
+		fmt.Sprintf(`{"code":%q,"redirect_uri":%q}`, second, callback))
+	burned.Body.Close()
+	if burned.StatusCode != http.StatusForbidden {
+		t.Fatalf("a burned code answered %d", burned.StatusCode)
+	}
+
+	// The service token is a real credential.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/whoami", nil)
+	req.Header.Set("Authorization", "Bearer "+service.Token)
+	who, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := decode[whoamiResponse](t, who)
+	if me.Account != minted.Account {
+		t.Fatalf("service token belongs to %s, want %s", me.Account, minted.Account)
+	}
+}

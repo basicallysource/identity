@@ -49,6 +49,22 @@ person: sign in, link the other provider, mint and revoke tokens.
 Tokens: `GET /v1/tokens`, `POST /v1/tokens {"name": "..."}`,
 `DELETE /v1/tokens/{id}`.
 
+## How a service gets a browser signed in
+
+Send the browser to `/authorize?redirect_uri=<your callback>&state=<yours>`.
+The page signs the person in (or already has them), then sends the browser
+back to your callback with a one-time `code`. Exchange it server-side:
+
+    POST /v1/exchange
+    {"code": "...", "redirect_uri": "<the same callback>"}
+
+which answers with a fresh token for your service to hold (in a cookie, a
+config file, wherever suits it). Callbacks must match a prefix in
+`IDENTITY_REDIRECT_ALLOW`; the code is single-use, short-lived, and bound to
+the callback it was minted for. There are no client secrets, scopes, or
+consent screens: every consumer is ours, and possession of an allowed
+callback URL is the client identity.
+
 ## Running it
 
     go build ./cmd/identityd && ./identityd
@@ -64,6 +80,7 @@ Configuration is environment variables:
 | `IDENTITY_DISCORD_CLIENT_ID` | — | a Discord application |
 | `IDENTITY_DISCORD_CLIENT_SECRET` | — | its secret |
 | `IDENTITY_CLIENT_IP_HEADER` | — | the header a proxy in front sets to the real client address, e.g. `CF-Connecting-IP`; empty trusts none |
+| `IDENTITY_REDIRECT_ALLOW` | — | comma-separated URL prefixes sign-ins may be handed off to; empty disables handoff |
 
 A provider with no credentials set is simply not offered. The Discord app must
 have `BASE_URL/signin/discord/callback` registered as a redirect, exactly.

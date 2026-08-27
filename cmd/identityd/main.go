@@ -8,6 +8,8 @@
 //	IDENTITY_GITHUB_CLIENT_ID       GitHub OAuth app with device flow enabled
 //	IDENTITY_DISCORD_CLIENT_ID      Discord application
 //	IDENTITY_DISCORD_CLIENT_SECRET  its secret
+//	IDENTITY_CLIENT_IP_HEADER       proxy header carrying the real client IP
+//	IDENTITY_REDIRECT_ALLOW         comma-separated URL prefixes handoffs may go to
 //
 // A provider with no credentials set is simply not offered. The Discord app
 // must have BASE_URL/signin/discord/callback registered as a redirect.
@@ -54,6 +56,7 @@ func main() {
 		},
 		BaseURL:        baseURL,
 		ClientIPHeader: os.Getenv("IDENTITY_CLIENT_IP_HEADER"),
+		RedirectAllow:  splitList(os.Getenv("IDENTITY_REDIRECT_ALLOW")),
 		Logger:         logger,
 	}
 
@@ -87,4 +90,15 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// splitList reads a comma-separated variable into its trimmed parts.
+func splitList(value string) []string {
+	var parts []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
 }
