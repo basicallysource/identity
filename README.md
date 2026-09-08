@@ -45,7 +45,7 @@ own origin before accepting a handoff token.
   account is refused, never moved.
 
 The service also serves a small page at `/` that walks all of this for a
-person: sign in, link the other provider, mint and revoke tokens.
+person: sign in, link the other provider, update a profile photo, mint and revoke tokens.
 
 Tokens: `GET /v1/tokens`, `POST /v1/tokens {"name": "..."}`,
 `DELETE /v1/tokens/{id}`.
@@ -61,7 +61,8 @@ back to your callback with a one-time `code`. Exchange it server-side:
 
 which answers with a fresh audience-bound token for your server to hold. Use a
 separate HttpOnly cookie for your application's session. Handoff tokens cannot
-manage the identity account or obtain other application tokens. The identity
+link providers, manage credentials or obtain other application tokens. They may
+read and update their own account's profile photo. The identity
 page keeps its own persistent HttpOnly session, so returning to it does not
 require repeating provider sign-in while that session is live.
 
@@ -88,6 +89,36 @@ Configuration is environment variables:
 | `IDENTITY_DISCORD_CLIENT_SECRET` | — | its secret |
 | `IDENTITY_CLIENT_IP_HEADER` | — | the header a proxy in front sets to the real client address, e.g. `CF-Connecting-IP`; empty trusts none |
 | `IDENTITY_REDIRECT_ALLOW` | — | comma-separated allowed callback URLs; a trailing slash allows descendants on the same origin; empty disables handoff |
+| `IDENTITY_ASSET_URL` | — | asset-service API origin; enables profile photos when configured |
+| `IDENTITY_ASSET_TOKEN` | — | server credential with read/write access to the photo namespace |
+| `IDENTITY_ASSET_NAMESPACE` | `profile-avatars` | private photo namespace |
+| `IDENTITY_STORAGE_ORIGIN` | — | allowed origin of private signed object URLs |
+
+## Profile photos
+
+`POST /v1/avatar` accepts the raw bytes of a JPEG, PNG or WebP image, with its
+matching Content-Type. The limit is 5 MiB, 16 megapixels, 8192 pixels per side,
+and six upload attempts per account per hour. Full decoding rejects malformed
+images before any storage request. Only one image upload runs at a time.
+
+The original bytes are saved privately in the asset service, which builds its
+normal rendition ladder. Configure that worker's image widths to include
+thumbnail sizes such as 64, 128 and 256 for small account pictures. Whoami adds
+`avatar: {id, width, height}` when a photo exists and `avatar_upload_enabled`.
+No private storage URL or asset-service credential is returned to the browser.
+
+`GET /v1/avatar?size=128` authenticates the caller and streams the smallest
+available image large enough for that square display size. It accounts for
+both dimensions when the photo is not square, and falls back to the largest
+available image if needed. Applications should use the desired rendered size
+times the display's pixel ratio, typically through `srcset`. Responses are
+private and not cached. `DELETE /v1/avatar` removes the account's photo reference;
+immutable original assets remain private in storage.
+
+Every avatar operation is for the authenticated account only. There is no
+account-ID parameter or public avatar route. Browser applications proxy this
+endpoint through their own authenticated backend and keep the identity token
+server-side. Cookies require same-origin writes, including photo uploads.
 
 A provider with no credentials set is simply not offered. The Discord app must
 have `BASE_URL/signin/discord/callback` registered as a redirect, exactly.

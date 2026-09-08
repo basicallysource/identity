@@ -22,11 +22,13 @@ type identityBody struct {
 }
 
 type whoamiResponse struct {
-	Account    string         `json:"account"`
-	Handle     string         `json:"handle"`
-	CreatedAt  time.Time      `json:"created_at"`
-	Identities []identityBody `json:"identities"`
-	Token      tokenBody      `json:"token"`
+	Account             string         `json:"account"`
+	Handle              string         `json:"handle"`
+	CreatedAt           time.Time      `json:"created_at"`
+	Identities          []identityBody `json:"identities"`
+	Token               tokenBody      `json:"token"`
+	Avatar              *avatarBody    `json:"avatar,omitempty"`
+	AvatarUploadEnabled bool           `json:"avatar_upload_enabled"`
 }
 
 type tokenBody struct {
@@ -53,10 +55,12 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := whoamiResponse{
-		Account:   account.ID,
-		Handle:    account.Handle,
-		CreatedAt: account.CreatedAt,
-		Token:     describeToken(credential),
+		Account:             account.ID,
+		Handle:              account.Handle,
+		CreatedAt:           account.CreatedAt,
+		Token:               describeToken(credential),
+		Avatar:              describeAvatar(account),
+		AvatarUploadEnabled: s.Avatars != nil,
 	}
 	for _, identity := range identities {
 		response.Identities = append(response.Identities, identityBody{

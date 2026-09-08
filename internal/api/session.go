@@ -53,7 +53,7 @@ func (s *Server) secure(next http.Handler) http.Handler {
 			}
 		}
 		_, credential, err := s.authenticate(r)
-		if err == nil && credential.Audience != "" && r.URL.Path != "/v1/whoami" {
+		if err == nil && credential.Audience != "" && r.URL.Path != "/v1/whoami" && r.URL.Path != "/v1/avatar" {
 			if !(r.Method == http.MethodDelete && r.URL.Path == "/v1/tokens/"+credential.ID) {
 				writeError(w, http.StatusForbidden, "application tokens cannot manage the account or sign in to another application")
 				return

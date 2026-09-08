@@ -1,8 +1,8 @@
 // Package store is the whole database: who exists, which provider identities
 // prove them, and which tokens speak for them.
 //
-// The shape is three tables. An account is the person; it owns nothing but an
-// id and a display handle. An identity is one proof of that person at a
+// The shape is three tables. An account is the person; it owns an id, a display
+// handle, and a private profile-photo reference. An identity is one proof at a
 // provider (github, discord), keyed by the provider's own immutable id, never
 // by a login that can be renamed and re-registered. A token is an opaque
 // credential this service minted; its secret is stored only as a hash.
@@ -31,9 +31,12 @@ var (
 
 // Account is the person behind every identity and token.
 type Account struct {
-	ID        string
-	Handle    string
-	CreatedAt time.Time
+	ID           string
+	Handle       string
+	CreatedAt    time.Time
+	AvatarKey    string
+	AvatarWidth  int
+	AvatarHeight int
 }
 
 // Identity is one provider's proof of an account. ProviderID is the
@@ -109,6 +112,17 @@ UPDATE tokens SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE name L
 PRAGMA user_version = 1;
 COMMIT;`)
 		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if schema_version < 2 {
+		if _, err := db.Exec(`BEGIN;
+ALTER TABLE accounts ADD COLUMN avatar_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE accounts ADD COLUMN avatar_width INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN avatar_height INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version = 2;
+COMMIT;`); err != nil {
 			db.Close()
 			return nil, err
 		}
@@ -258,8 +272,8 @@ func accountByID(ctx context.Context, q querier, id string) (Account, error) {
 	var a Account
 	var created string
 	err := q.QueryRowContext(ctx,
-		`SELECT id, handle, created_at FROM accounts WHERE id = ?`, id).
-		Scan(&a.ID, &a.Handle, &created)
+		`SELECT id, handle, created_at, avatar_key, avatar_width, avatar_height FROM accounts WHERE id = ?`, id).
+		Scan(&a.ID, &a.Handle, &created, &a.AvatarKey, &a.AvatarWidth, &a.AvatarHeight)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -268,6 +282,11 @@ func accountByID(ctx context.Context, q querier, id string) (Account, error) {
 	}
 	a.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	return a, nil
+}
+
+func (db *DB) SetAvatar(ctx context.Context, account_id, key string, width, height int) error {
+	_, err := db.sql.ExecContext(ctx, `UPDATE accounts SET avatar_key=?, avatar_width=?, avatar_height=?, updated_at=? WHERE id=?`, key, width, height, time.Now().UTC().Format(time.RFC3339Nano), account_id)
+	return err
 }
 
 // IdentitiesFor lists an account's proofs, oldest first.

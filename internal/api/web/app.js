@@ -1,4 +1,5 @@
 const app = document.getElementById('app');
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 let signed_in = false;
 let github_attempt = 0;
 
@@ -190,6 +191,32 @@ async function signedIn(message) {
   nodes.push(el('p', {},
     'Signed in as ', el('strong', {}, me.handle), ' ',
     el('span', {class: 'muted mono'}, '(' + me.account + ')')));
+
+  if (me.avatar_upload_enabled) {
+    const photo_input = el('input', {type: 'file', accept: 'image/jpeg,image/png,image/webp', 'aria-label': 'Choose profile photo'});
+    photo_input.addEventListener('change', async () => {
+      const file = photo_input.files[0];
+      if (!file) return;
+      if (file.size > MAX_PHOTO_BYTES) return signedIn('Choose an image no larger than 5 MiB.');
+      photo_input.disabled = true;
+      try {
+        const response = await fetch('/v1/avatar', {method: 'POST', headers: {'Content-Type': file.type, 'X-Identity-Browser': '1'}, body: file});
+        if (!response.ok) return signedIn((await response.json()).error);
+        await signedIn();
+      } catch { await signedIn('Could not upload the photo. Try again.'); }
+    });
+    nodes.push(el('h2', {}, 'profile photo'));
+    if (me.avatar) {
+      const picture_url = size => '/v1/avatar?size=' + size + '&v=' + encodeURIComponent(me.avatar.id);
+      nodes.push(el('img', {src: picture_url(96), srcset: picture_url(192) + ' 2x, ' + picture_url(288) + ' 3x', width: '96', height: '96', alt: 'Your profile photo', class: 'avatar'}));
+    }
+    nodes.push(photo_input, el('p', {class: 'muted'}, 'JPEG, PNG or WebP. Up to 5 MiB, 16 megapixels and 8192 pixels per side.'));
+    if (me.avatar) nodes.push(el('button', {onclick: async () => {
+      const response = await api('DELETE', '/v1/avatar');
+      if (!response.ok) return fail(response);
+      await signedIn();
+    }}, 'Remove photo'));
+  }
 
   // Identities, and the link buttons for whichever provider is missing.
   const linked = new Set(me.identities.map(i => i.provider));

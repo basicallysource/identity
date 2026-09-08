@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/basicallysource/identity/internal/avatar"
 	"github.com/basicallysource/identity/internal/provider"
 	"github.com/basicallysource/identity/internal/store"
 	"github.com/basicallysource/identity/internal/token"
@@ -47,7 +48,10 @@ type Server struct {
 	RedirectAllow []string
 	Logger        *slog.Logger
 	// Now is the clock, swapped in tests.
-	Now func() time.Time
+	Now             func() time.Time
+	Avatars         *avatar.Assets
+	avatar_mu       sync.Mutex
+	avatar_throttle throttle
 
 	// pending ties multi-step flows together across requests: a device code
 	// or an OAuth state, and -- when the flow is a link rather than a
@@ -69,6 +73,7 @@ type pendingFlow struct {
 
 // Handler builds the routes.
 func (s *Server) Handler() http.Handler {
+	s.avatar_throttle.limit, s.avatar_throttle.per = 6, time.Hour
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", s.page)
@@ -91,6 +96,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /signin/discord/callback", s.discordCallback)
 
 	mux.HandleFunc("GET /v1/whoami", s.whoami)
+	mux.HandleFunc("GET /v1/avatar", s.avatar)
+	mux.HandleFunc("POST /v1/avatar", s.uploadAvatar)
+	mux.HandleFunc("DELETE /v1/avatar", s.removeAvatar)
 	mux.HandleFunc("POST /v1/handoff", s.handoff)
 	mux.HandleFunc("POST /v1/exchange", s.exchange)
 	mux.HandleFunc("GET /v1/tokens", s.listTokens)

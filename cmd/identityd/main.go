@@ -10,6 +10,10 @@
 //	IDENTITY_DISCORD_CLIENT_SECRET  its secret
 //	IDENTITY_CLIENT_IP_HEADER       proxy header carrying the real client IP
 //	IDENTITY_REDIRECT_ALLOW         comma-separated URL prefixes handoffs may go to
+//	IDENTITY_ASSET_URL              asset-service API origin
+//	IDENTITY_ASSET_TOKEN            scoped profile-photo service credential
+//	IDENTITY_ASSET_NAMESPACE        private profile-photo namespace
+//	IDENTITY_STORAGE_ORIGIN         private asset storage origin
 //
 // A provider with no credentials set is simply not offered. The Discord app
 // must have BASE_URL/signin/discord/callback registered as a redirect.
@@ -27,6 +31,7 @@ import (
 	"time"
 
 	"github.com/basicallysource/identity/internal/api"
+	"github.com/basicallysource/identity/internal/avatar"
 	"github.com/basicallysource/identity/internal/provider"
 	"github.com/basicallysource/identity/internal/store"
 )
@@ -59,11 +64,21 @@ func main() {
 		RedirectAllow:  splitList(os.Getenv("IDENTITY_REDIRECT_ALLOW")),
 		Logger:         logger,
 	}
+	if os.Getenv("IDENTITY_ASSET_URL") != "" {
+		server.Avatars, err = avatar.New(strings.TrimRight(os.Getenv("IDENTITY_ASSET_URL"), "/"), os.Getenv("IDENTITY_ASSET_TOKEN"), env("IDENTITY_ASSET_NAMESPACE", "profile-avatars"), strings.TrimRight(os.Getenv("IDENTITY_STORAGE_ORIGIN"), "/"))
+		if err != nil {
+			logger.Error("avatar configuration", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	httpServer := &http.Server{
 		Addr:              addr,
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      90 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {

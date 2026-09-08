@@ -39,7 +39,8 @@ exactly. Use exact callbacks for hosted applications. URL parsing rejects userin
 fragments, foreign hosts, and non-HTTPS destinations other than loopback HTTP.
 
 Handoff tokens have an immutable audience equal to the callback origin. They can
-call `/v1/whoami` and revoke themselves. They cannot link providers, create tokens,
+call `/v1/whoami`, read/update their own `/v1/avatar`, and revoke themselves.
+They cannot link providers, create tokens,
 list other tokens, revoke other tokens, or obtain another application handoff.
 Every consumer must check `token.audience` against its own configured origin.
 The audience is a constraint on identity credentials; document roles and other
@@ -51,6 +52,22 @@ these operator credentials. Browser-facing applications should accept only their
 own audience-bound tokens, kept server-side behind a separate session cookie.
 
 ## Storage and lifecycle
+
+Profile photos belong to the shared identity account. The database keeps the
+private asset key and original dimensions; asset service owns the original
+bytes and background renditions. A scoped server credential always uploads
+with private visibility. Reads choose the smallest sufficient image using both
+dimensions, validate its storage origin, and stream it without forwarding the
+asset credential or exposing its signed URL. There is no public photo route.
+Application tokens can change their own account's photo, an explicit shared
+profile capability that does not grant provider or credential management.
+
+Uploads accept JPEG, PNG and WebP only. They are capped at 5 MiB, 16 megapixels,
+8192 pixels per side, six attempts per account per hour, and one concurrent
+image decode/upload. Full decoding happens before storage. Original bytes are
+preserved exactly, while the asset service's resized images serve UI displays.
+Removing or replacing a photo changes its reference; immutable assets remain
+private. Account metadata and provider proofs remain the only profile fields.
 
 One Go binary and SQLite database, WAL, one database connection. Accounts,
 provider identities, and hashed tokens are durable. Pending provider flows and
@@ -75,6 +92,7 @@ in again once. Other account tokens and machine credentials remain valid.
 - `cmd/identityd`: environment configuration and process lifecycle.
 - `internal/api`: HTTP API, browser sessions, provider flows, handoffs.
 - `internal/api/web`: HTML, JavaScript and CSS.
+- `internal/avatar`: scoped private asset-service uploads and rendition delivery.
 - `internal/provider`: GitHub and Discord exchanges.
 - `internal/store`: accounts, identities, tokens and migrations.
 - `internal/token`: random opaque credentials and hashing.
