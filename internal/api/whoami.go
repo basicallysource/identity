@@ -32,6 +32,7 @@ type whoamiResponse struct {
 type tokenBody struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
+	Audience  string     `json:"audience"`
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	Revoked   bool       `json:"revoked,omitempty"`
@@ -117,7 +118,7 @@ func (s *Server) mintToken(w http.ResponseWriter, r *http.Request) {
 		name = "token"
 	}
 
-	minted, err := s.issue(r, account, name)
+	minted, err := s.issue(r, account, name, "")
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
@@ -148,6 +149,7 @@ func describeToken(t store.Token) tokenBody {
 	body := tokenBody{
 		ID:        t.ID,
 		Name:      t.Name,
+		Audience:  t.Audience,
 		CreatedAt: t.CreatedAt,
 		Revoked:   !t.RevokedAt.IsZero(),
 	}

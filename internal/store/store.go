@@ -55,6 +55,7 @@ type Token struct {
 	SecretHash string
 	AccountID  string
 	Name       string
+	Audience   string
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	RevokedAt  time.Time
@@ -79,6 +80,7 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
+	db.SetMaxOpenConns(1)
 	// One writer at a time is this service's whole load; WAL keeps readers
 	// out of the writer's way and busy_timeout absorbs the rest.
 	for _, pragma := range []string{
@@ -94,6 +96,22 @@ func Open(path string) (*DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: create schema: %w", err)
+	}
+	var schema_version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&schema_version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if schema_version < 1 {
+		_, err := db.Exec(`BEGIN;
+ALTER TABLE tokens ADD COLUMN audience TEXT NOT NULL DEFAULT '';
+UPDATE tokens SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE name LIKE 'handoff %';
+PRAGMA user_version = 1;
+COMMIT;`)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return &DB{sql: db}, nil
 }
@@ -285,9 +303,9 @@ func (db *DB) InsertToken(ctx context.Context, t Token) error {
 		revoked = t.RevokedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO tokens (id, secret_hash, account_id, name, created_at, expires_at, revoked_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.SecretHash, t.AccountID, t.Name,
+		`INSERT INTO tokens (id, secret_hash, account_id, name, audience, created_at, expires_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.SecretHash, t.AccountID, t.Name, t.Audience,
 		t.CreatedAt.UTC().Format(time.RFC3339Nano), expires, revoked)
 	if err != nil {
 		return fmt.Errorf("store: insert token %s: %w", t.ID, err)
@@ -298,7 +316,7 @@ func (db *DB) InsertToken(ctx context.Context, t Token) error {
 // TokenByID returns one token, or ErrNotFound.
 func (db *DB) TokenByID(ctx context.Context, id string) (Token, error) {
 	row := db.sql.QueryRowContext(ctx,
-		`SELECT id, secret_hash, account_id, name, created_at, expires_at, revoked_at
+		`SELECT id, secret_hash, account_id, name, audience, created_at, expires_at, revoked_at
 		 FROM tokens WHERE id = ?`, id)
 	return scanToken(row.Scan)
 }
@@ -306,7 +324,7 @@ func (db *DB) TokenByID(ctx context.Context, id string) (Token, error) {
 // TokensFor lists an account's tokens, newest first.
 func (db *DB) TokensFor(ctx context.Context, accountID string) ([]Token, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT id, secret_hash, account_id, name, created_at, expires_at, revoked_at
+		`SELECT id, secret_hash, account_id, name, audience, created_at, expires_at, revoked_at
 		 FROM tokens WHERE account_id = ? ORDER BY created_at DESC`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("store: tokens for %s: %w", accountID, err)
@@ -357,7 +375,7 @@ func scanToken(scan func(...any) error) (Token, error) {
 	var t Token
 	var created string
 	var expires, revoked sql.NullString
-	err := scan(&t.ID, &t.SecretHash, &t.AccountID, &t.Name, &created, &expires, &revoked)
+	err := scan(&t.ID, &t.SecretHash, &t.AccountID, &t.Name, &t.Audience, &created, &expires, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Token{}, ErrNotFound
 	}

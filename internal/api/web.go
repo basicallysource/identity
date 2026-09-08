@@ -6,13 +6,7 @@ import (
 	"net/http"
 )
 
-// The page holds its token in the tab (sessionStorage) rather than in a
-// cookie, and attaches it by hand to every request. Nothing here is an
-// ambient credential, so there is nothing for another site to make this page
-// do on a visitor's behalf. The one cookie in the whole flow is the Discord
-// state cookie, which proves nothing but "this browser started a sign-in".
-
-//go:embed web/index.html web/style.css web/callback.html
+//go:embed web/index.html web/style.css web/callback.html web/app.js
 var webFiles embed.FS
 
 var callbackTemplate = template.Must(template.ParseFS(webFiles, "web/callback.html"))
@@ -20,7 +14,6 @@ var callbackTemplate = template.Must(template.ParseFS(webFiles, "web/callback.ht
 // callbackView is what the Discord callback page can say: a fresh token to
 // stash and carry home, a completed link, or what went wrong.
 type callbackView struct {
-	Token  string
 	Linked bool
 	Error  string
 }
@@ -34,6 +27,11 @@ func (s *Server) stylesheet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) callbackPage(w http.ResponseWriter, view callbackView) {
+	if view.Linked {
+		w.Header().Set("Location", "/")
+		w.WriteHeader(http.StatusSeeOther)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	if err := callbackTemplate.Execute(w, view); err != nil {

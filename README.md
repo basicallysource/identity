@@ -23,12 +23,13 @@ Accept a bearer token, forward it:
       "identities": [
         {"provider": "github", "id": "583231", "handle": "octocat", "proved_at": "..."}
       ],
-      "token": {"id": "...", "name": "...", "expires_at": "..."}
+      "token": {"id": "...", "name": "...", "audience": "https://app.example.com", "expires_at": "..."}
     }
 
 `401` means the token is bad, expired, or revoked. That is the whole
-integration: who this is, never what they may do — authorization stays each
-service's own business.
+integration: who this is, never application roles. Authorization stays each
+service's own business. Applications must check `token.audience` against their
+own origin before accepting a handoff token.
 
 ## How a person signs in
 
@@ -51,19 +52,25 @@ Tokens: `GET /v1/tokens`, `POST /v1/tokens {"name": "..."}`,
 
 ## How a service gets a browser signed in
 
-Send the browser to `/authorize?redirect_uri=<your callback>&state=<yours>`.
+Send the browser to `/authorize?redirect_uri=<your callback>&state=<yours>&code_challenge=<S256 challenge>`. Keep the random verifier server-side until the callback.
 The page signs the person in (or already has them), then sends the browser
 back to your callback with a one-time `code`. Exchange it server-side:
 
     POST /v1/exchange
-    {"code": "...", "redirect_uri": "<the same callback>"}
+    {"code": "...", "redirect_uri": "<the same callback>", "code_verifier": "..."}
 
-which answers with a fresh token for your service to hold (in a cookie, a
-config file, wherever suits it). Callbacks must match a prefix in
-`IDENTITY_REDIRECT_ALLOW`; the code is single-use, short-lived, and bound to
-the callback it was minted for. There are no client secrets, scopes, or
-consent screens: every consumer is ours, and possession of an allowed
-callback URL is the client identity.
+which answers with a fresh audience-bound token for your server to hold. Use a
+separate HttpOnly cookie for your application's session. Handoff tokens cannot
+manage the identity account or obtain other application tokens. The identity
+page keeps its own persistent HttpOnly session, so returning to it does not
+require repeating provider sign-in while that session is live.
+
+Callbacks must match `IDENTITY_REDIRECT_ALLOW`; prefer exact callback URLs. An
+entry ending in `/` allows descendant paths on the same origin. Codes are
+single-use, short-lived, bound to their callback and optional PKCE challenge,
+and invalidated if their authorizing token is revoked. PKCE is recommended for
+all browser consumers. There are no third-party client registrations or consent
+screens; this service is for applications operated together.
 
 ## Running it
 
@@ -80,7 +87,7 @@ Configuration is environment variables:
 | `IDENTITY_DISCORD_CLIENT_ID` | — | a Discord application |
 | `IDENTITY_DISCORD_CLIENT_SECRET` | — | its secret |
 | `IDENTITY_CLIENT_IP_HEADER` | — | the header a proxy in front sets to the real client address, e.g. `CF-Connecting-IP`; empty trusts none |
-| `IDENTITY_REDIRECT_ALLOW` | — | comma-separated URL prefixes sign-ins may be handed off to; empty disables handoff |
+| `IDENTITY_REDIRECT_ALLOW` | — | comma-separated allowed callback URLs; a trailing slash allows descendants on the same origin; empty disables handoff |
 
 A provider with no credentials set is simply not offered. The Discord app must
 have `BASE_URL/signin/discord/callback` registered as a redirect, exactly.

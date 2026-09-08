@@ -202,12 +202,13 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 		s.callbackPage(w, callbackView{Error: "could not record the sign-in"})
 		return
 	}
-	minted, err := s.issue(r, account, "")
+	minted, err := s.issue(r, account, "", "")
 	if err != nil {
 		s.callbackPage(w, callbackView{Error: "could not issue a token: " + err.Error()})
 		return
 	}
-	s.callbackPage(w, callbackView{Token: minted.Token})
+	s.setSession(w, minted.Token, *minted.ExpiresAt)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Server) discordRedirect() string {
@@ -222,10 +223,14 @@ func (s *Server) finishSignIn(w http.ResponseWriter, r *http.Request, providerNa
 		writeError(w, http.StatusInternalServerError, "could not record the sign-in")
 		return
 	}
-	minted, err := s.issue(r, account, "")
+	minted, err := s.issue(r, account, "", "")
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
+	}
+	if r.Header.Get("X-Identity-Browser") == "1" {
+		s.setSession(w, minted.Token, *minted.ExpiresAt)
+		minted.Token = ""
 	}
 	writeJSON(w, http.StatusCreated, minted)
 }
@@ -251,7 +256,7 @@ func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, accountID, p
 
 // issue mints a token for an account, within policy. An empty name gets the
 // sign-in default.
-func (s *Server) issue(r *http.Request, account store.Account, name string) (tokenResponse, error) {
+func (s *Server) issue(r *http.Request, account store.Account, name, audience string) (tokenResponse, error) {
 	now := s.now()
 	if name == "" {
 		name = "sign-in " + now.Format("2006-01-02")
@@ -278,6 +283,7 @@ func (s *Server) issue(r *http.Request, account store.Account, name string) (tok
 		SecretHash: secretHash,
 		AccountID:  account.ID,
 		Name:       name,
+		Audience:   audience,
 		CreatedAt:  now,
 		ExpiresAt:  expires,
 	}); err != nil {

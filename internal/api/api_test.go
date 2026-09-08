@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -192,23 +191,34 @@ func discordCallbackPage(t *testing.T, ts *httptest.Server, bearer string) strin
 	req, _ := http.NewRequest(http.MethodGet,
 		ts.URL+"/signin/discord/callback?code=any&state="+state, nil)
 	req.AddCookie(cookie)
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	page, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusSeeOther {
+		if bearer == "" {
+			cookies := resp.Cookies()
+			if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].MaxAge <= 0 {
+				t.Fatal("missing persistent cookie")
+			}
+			if strings.Contains(string(page), cookies[0].Value) {
+				t.Fatal("token exposed in page")
+			}
+		}
+		return "signed in"
+	}
 	return string(page)
 }
 
 func TestDiscordSignInAndLink(t *testing.T) {
 	ts, _ := newTestServer(t)
 
-	// A fresh Discord sign-in mints a token the page stores.
 	page := discordCallbackPage(t, ts, "")
-	match := regexp.MustCompile(`bsid_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+`).FindString(page)
-	if match == "" {
-		t.Fatalf("callback page carries no token:\n%s", page)
+	if page != "signed in" {
+		t.Fatalf("sign-in failed: %s", page)
 	}
 
 	// A GitHub account linking Discord: same Discord identity now belongs to

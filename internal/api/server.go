@@ -60,9 +60,11 @@ type Server struct {
 }
 
 type pendingFlow struct {
-	accountID   string
-	redirectURI string
-	expires     time.Time
+	accountID     string
+	redirectURI   string
+	codeChallenge string
+	tokenID       string
+	expires       time.Time
 }
 
 // Handler builds the routes.
@@ -74,6 +76,11 @@ func (s *Server) Handler() http.Handler {
 	// consuming service has a name to send the browser to.
 	mux.HandleFunc("GET /authorize", s.page)
 	mux.HandleFunc("GET /style.css", s.stylesheet)
+	mux.HandleFunc("GET /app.js", func(w http.ResponseWriter, r *http.Request) { serveEmbedded(w, "web/app.js", "text/javascript") })
+	mux.HandleFunc("POST /session/logout", s.logout)
+	mux.HandleFunc("GET /providers", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]bool{"github": s.GitHub.Configured(), "discord": s.Discord.Configured()})
+	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
@@ -90,7 +97,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tokens", s.mintToken)
 	mux.HandleFunc("DELETE /v1/tokens/{id}", s.revokeToken)
 
-	return mux
+	return s.secure(mux)
 }
 
 func (s *Server) now() time.Time {

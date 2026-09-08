@@ -1,82 +1,80 @@
 # Architecture
 
-The committed decisions and their reasons. Change a decision, change this file
-in the same commit.
+Identity proves an account; each consuming application decides what that account
+may read or change. An account has a random internal ID. Provider identities are
+attached by immutable GitHub or Discord IDs, never by handle or email.
 
-## What it does
+## Sign-in and linking
 
-One account per human across Basically's services. A person proves who they
-are at GitHub or Discord; this service records that proof against one account
-and mints an opaque token. Every other service accepts that token and asks
-this one who it belongs to. The other Basically services (the asset service,
-hive, the bots' web surfaces) are expected to migrate their sign-in here over
-time; new services start here and never grow their own.
+GitHub uses device flow. Discord uses its authorization-code redirect flow.
+Provider access tokens are used once to fetch identity, then discarded.
+Starting either flow while authenticated links that provider to the current
+account. An identity already attached to another account is refused. Signing
+in separately with two providers creates two accounts; there is no email-based
+matching or account merge operation.
 
-## The one idea
+Browser sign-in uses a persistent, host-only HttpOnly cookie. HTTPS deployments
+use the `__Host-identity` cookie prefix and Secure flag. Cookie-authenticated
+writes require an exact matching Origin. The cookie holds an opaque account
+token whose secret is stored only as a hash in SQLite. Sign-out revokes it.
+The browser script does not receive that token. GitHub CLI sign-in still returns
+a token; the browser requests cookie mode with `X-Identity-Browser: 1`.
 
-Identity and authorization are different services' jobs. This service answers
-exactly one question — *who is this token* — and refuses to grow opinions
-about what the answer is allowed to do. Tiers, roles, quotas, and scopes live
-in each consuming service, keyed by the account id this service hands out.
-That is what keeps the surface small enough to trust: no consent screens, no
-scopes, no delegated third-party tokens, no admin UI.
+The web page exposes configured providers, provider linking, token management,
+and sign-out. Scripts load from this service only. Tokens and handoff codes are
+not placed in URLs except for the short-lived one-time callback code.
 
-## Committed decisions
+## Application handoff
 
-- **Build, don't self-host an IdP.** Keycloak/Authentik/Ory idle at hundreds
-  of MB and instantly become the most security-critical box in the fleet with
-  someone else's CVE stream attached. "Never roll your own auth" is about
-  passwords and crypto; this design has neither. GitHub and Discord do the
-  passwords. Tokens are 32 random bytes verified by hashed lookup —
-  revocable, no signatures, no JWT expiry-vs-revocation dance.
-- **Provider ids, not logins, are the identity.** An identity is keyed by the
-  provider's immutable id (GitHub's numeric id, Discord's snowflake). A login
-  can be renamed and re-registered by somebody else; the handle is recorded
-  but only as the human-readable name at the time of the last proof.
-- **Provider tokens are used once and dropped.** The GitHub/Discord access
-  token proves an identity via one who-am-I call and is never stored. This
-  service holds who people are, never credentials to act as them elsewhere.
-- **GitHub is the device flow.** No redirect to catch, no client secret to
-  keep; works identically from a browser, a terminal, or a desktop app. That
-  matters because the consumers include CLIs and local apps, not just sites.
-- **Discord is the redirect flow, because Discord offers nothing else.** It is
-  OAuth2 but not OIDC (no id_token), so the proof is the same shape as
-  GitHub's: ask `/users/@me` who the token belongs to. The one cookie in the
-  system is the short-lived state cookie this flow needs.
-- **Linking reuses the sign-in flows.** Any flow started with a bearer token
-  attaches the proved identity to that account instead of signing in. An
-  identity that already proves a different account is refused, never moved —
-  account merging is a deliberate future operation, not a side effect.
-- **Accounts merge by copying, services integrate by HTTP.** A consuming
-  service's whole authenticator is `GET /v1/whoami`. When an existing service
-  migrates here, its account rows copy over and its own authenticator becomes
-  that call; nothing else about it changes.
-- **One binary, one SQLite file, WAL.** The write load is humans signing in;
-  a database server would be pure operational surface. Half-finished flows
-  (device codes, OAuth states) live in memory and cost one retry on restart.
-- **Tokens expire (90 days) and live tokens are capped (25 per account).** A
-  leaked token has a horizon and "make another one" cannot go on forever. The
-  page holds its token in sessionStorage, not a cookie: nothing on this
-  service is an ambient credential a third party could ride.
+An application redirects to `/authorize` with `redirect_uri`, `state`, and
+optionally an S256 `code_challenge`. Browser consumers should always supply PKCE.
+The identity page obtains a single-use code through `/v1/handoff`. The application
+exchanges it server-side at `/v1/exchange`, supplying `code_verifier` when the code
+was challenge-bound. Codes expire after two minutes, are bound to the callback,
+and are refused if the account token that created them has been revoked.
 
-## Not built yet, and where it goes
+`IDENTITY_REDIRECT_ALLOW` contains allowed callback URLs. An entry ending in `/`
+allows descendants on that same scheme and host; otherwise its path must match
+exactly. Use exact callbacks for hosted applications. URL parsing rejects userinfo,
+fragments, foreign hosts, and non-HTTPS destinations other than loopback HTTP.
 
-- **Real SSO** — one browser session across sibling sites, id_tokens, other
-  people's software verifying tokens. That full OIDC-provider surface is
-  where DIY becomes a liability; re-evaluate an off-the-shelf IdP at that
-  point, not before. Accounts data walks over in one copy either way.
-- **Account merging** — two accounts discovered to be the same human. Needs a
-  deliberate flow with both proofs in hand; until then the conflict error is
-  correct.
-- **Service-scoped tokens** — today a token is identity-wide, which is fine
-  while every consumer is ours. If third-party consumers ever appear, tokens
-  grow an audience.
+Handoff tokens have an immutable audience equal to the callback origin. They can
+call `/v1/whoami` and revoke themselves. They cannot link providers, create tokens,
+list other tokens, revoke other tokens, or obtain another application handoff.
+Every consumer must check `token.audience` against its own configured origin.
+The audience is a constraint on identity credentials; document roles and other
+application permissions remain the consumer's responsibility.
+
+Account tokens obtained directly through sign-in or explicitly minted through
+token management retain account-management rights. A CLI may deliberately accept
+these operator credentials. Browser-facing applications should accept only their
+own audience-bound tokens, kept server-side behind a separate session cookie.
+
+## Storage and lifecycle
+
+One Go binary and SQLite database, WAL, one database connection. Accounts,
+provider identities, and hashed tokens are durable. Pending provider flows and
+handoff codes are in memory; a restart costs an unfinished sign-in one retry.
+Tokens expire after 90 days and live tokens are capped at 25 per account.
+Application sessions may impose a shorter lifetime.
+
+The audience schema migration revokes existing tokens named `handoff ...`, since
+those older credentials carried account-wide authority. Browser consumers sign
+in again once. Other account tokens and machine credentials remain valid.
+
+## Deliberately absent
+
+- Automatic matching by email and account merging. Merging needs proof of both
+  accounts and a deliberate policy for each consumer's existing data.
+- Third-party clients, OIDC discovery, consent screens, and a general OAuth
+  authorization server. Revisit a standard identity provider before adding them.
+- Application roles or data permissions. Consumers own those checks.
 
 ## Layout
 
-    cmd/identityd        the binary: env config, wiring, shutdown
-    internal/api         HTTP surface: sign-in flows, whoami, tokens, the page
-    internal/api/web     the page (vanilla JS, sessionStorage token) + styles
-    internal/provider    GitHub device flow, Discord redirect flow
-    internal/store       SQLite: accounts, identities, tokens
-    internal/token       opaque token mint/parse/hash
+- `cmd/identityd`: environment configuration and process lifecycle.
+- `internal/api`: HTTP API, browser sessions, provider flows, handoffs.
+- `internal/api/web`: HTML, JavaScript and CSS.
+- `internal/provider`: GitHub and Discord exchanges.
+- `internal/store`: accounts, identities, tokens and migrations.
+- `internal/token`: random opaque credentials and hashing.
