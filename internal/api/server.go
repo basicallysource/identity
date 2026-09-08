@@ -98,6 +98,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/whoami", s.whoami)
 	mux.HandleFunc("GET /v1/avatar", s.avatar)
 	mux.HandleFunc("POST /v1/avatar", s.uploadAvatar)
+	mux.HandleFunc("PUT /v1/avatar", s.selectAvatar)
 	mux.HandleFunc("DELETE /v1/avatar", s.removeAvatar)
 	mux.HandleFunc("POST /v1/handoff", s.handoff)
 	mux.HandleFunc("POST /v1/exchange", s.exchange)

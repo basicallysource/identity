@@ -15,10 +15,11 @@ import (
 // is out. A consuming service's whole authenticator is one GET here.
 
 type identityBody struct {
-	Provider string    `json:"provider"`
-	ID       string    `json:"id"`
-	Handle   string    `json:"handle"`
-	ProvedAt time.Time `json:"proved_at"`
+	Provider string      `json:"provider"`
+	ID       string      `json:"id"`
+	Handle   string      `json:"handle"`
+	ProvedAt time.Time   `json:"proved_at"`
+	Avatar   *avatarBody `json:"avatar,omitempty"`
 }
 
 type whoamiResponse struct {
@@ -28,6 +29,7 @@ type whoamiResponse struct {
 	Identities          []identityBody `json:"identities"`
 	Token               tokenBody      `json:"token"`
 	Avatar              *avatarBody    `json:"avatar,omitempty"`
+	UploadedAvatar      *avatarBody    `json:"uploaded_avatar,omitempty"`
 	AvatarUploadEnabled bool           `json:"avatar_upload_enabled"`
 }
 
@@ -54,20 +56,24 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	selected_avatar, uploaded_avatar, provider_avatars := accountAvatars(account, identities)
 	response := whoamiResponse{
 		Account:             account.ID,
 		Handle:              account.Handle,
 		CreatedAt:           account.CreatedAt,
 		Token:               describeToken(credential),
-		Avatar:              describeAvatar(account),
+		Avatar:              selected_avatar,
+		UploadedAvatar:      uploaded_avatar,
 		AvatarUploadEnabled: s.Avatars != nil,
 	}
 	for _, identity := range identities {
+		source := identity.Provider
 		response.Identities = append(response.Identities, identityBody{
 			Provider: identity.Provider,
 			ID:       identity.ProviderID,
 			Handle:   identity.Handle,
 			ProvedAt: identity.ProvedAt,
+			Avatar:   provider_avatars[source],
 		})
 	}
 	writeJSON(w, http.StatusOK, response)

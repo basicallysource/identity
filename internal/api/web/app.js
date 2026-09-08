@@ -193,6 +193,7 @@ async function signedIn(message) {
     el('span', {class: 'muted mono'}, '(' + me.account + ')')));
 
   if (me.avatar_upload_enabled) {
+    const pictureUrl = (size, avatar) => '/v1/avatar?size=' + size + '&source=' + encodeURIComponent(avatar.source) + '&v=' + encodeURIComponent(avatar.id);
     const photo_input = el('input', {type: 'file', accept: 'image/jpeg,image/png,image/webp', 'aria-label': 'Choose profile photo'});
     photo_input.addEventListener('change', async () => {
       const file = photo_input.files[0];
@@ -206,16 +207,22 @@ async function signedIn(message) {
       } catch { await signedIn('Could not upload the photo. Try again.'); }
     });
     nodes.push(el('h2', {}, 'profile photo'));
-    if (me.avatar) {
-      const picture_url = size => '/v1/avatar?size=' + size + '&v=' + encodeURIComponent(me.avatar.id);
-      nodes.push(el('img', {src: picture_url(96), srcset: picture_url(192) + ' 2x, ' + picture_url(288) + ' 3x', width: '96', height: '96', alt: 'Your profile photo', class: 'avatar'}));
+    const choices = me.identities.filter(identity => identity.avatar).map(identity => ({avatar: identity.avatar, label: identity.provider + ' · ' + identity.handle}));
+    if (me.uploaded_avatar) choices.push({avatar: me.uploaded_avatar, label: 'Uploaded photo'});
+    if (choices.length) {
+      const choice_nodes = choices.map(choice => el('button', {class: 'avatar-choice' + (me.avatar?.source === choice.avatar.source ? ' selected' : ''), onclick: async () => {
+        const response = await api('PUT', '/v1/avatar', {source: choice.avatar.source});
+        if (!response.ok) return fail(response);
+        await signedIn();
+      }}, el('img', {src: pictureUrl(64, choice.avatar), srcset: pictureUrl(128, choice.avatar) + ' 2x', width: '64', height: '64', alt: ''}), el('span', {}, choice.label)));
+      nodes.push(el('div', {class: 'avatar-choices'}, ...choice_nodes));
     }
     nodes.push(photo_input, el('p', {class: 'muted'}, 'JPEG, PNG or WebP. Up to 5 MiB, 16 megapixels and 8192 pixels per side.'));
-    if (me.avatar) nodes.push(el('button', {onclick: async () => {
+    if (me.uploaded_avatar) nodes.push(el('button', {onclick: async () => {
       const response = await api('DELETE', '/v1/avatar');
       if (!response.ok) return fail(response);
       await signedIn();
-    }}, 'Remove photo'));
+    }}, 'Delete uploaded photo'));
   }
 
   // Identities, and the link buttons for whichever provider is missing.

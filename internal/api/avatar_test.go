@@ -195,3 +195,41 @@ func TestAvatarCookieWritesRequireSameOrigin(t *testing.T) {
 		t.Fatal("cross-origin cookie photo mutation accepted")
 	}
 }
+
+func TestProviderAvatarPrioritySelectionAndFallback(t *testing.T) {
+	_, s := newTestServer(t)
+	account, err := s.Store.SignIn(context.Background(), "github", "1", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Store.Link(context.Background(), account.ID, "discord", "2", "second"); err != nil {
+		t.Fatal(err)
+	}
+	s.Store.SetIdentityAvatar(context.Background(), "github", "1", "profile-avatars/github.png", 400, 400)
+	s.Store.SetIdentityAvatar(context.Background(), "discord", "2", "profile-avatars/discord.png", 500, 500)
+	identities, _ := s.Store.IdentitiesFor(context.Background(), account.ID)
+	selected, _, _ := accountAvatars(account, identities)
+	if selected == nil || selected.Source != "github" {
+		t.Fatalf("first linked provider was not the default: %+v", selected)
+	}
+	credential, _ := s.issue(httptest.NewRequest("GET", "/", nil), account, "profile", "https://app.example.com")
+	response := avatarRequest(s, "PUT", "/v1/avatar", credential.Token, "application/json", []byte(`{"source":"discord"}`), -1)
+	if response.Code != 204 {
+		t.Fatalf("select: %d %s", response.Code, response.Body.String())
+	}
+	account, _ = s.Store.AccountByID(context.Background(), account.ID)
+	selected, _, _ = accountAvatars(account, identities)
+	if selected == nil || selected.Source != "discord" {
+		t.Fatalf("explicit provider was not selected: %+v", selected)
+	}
+	s.Store.SetIdentityAvatar(context.Background(), "discord", "2", "", 0, 0)
+	identities, _ = s.Store.IdentitiesFor(context.Background(), account.ID)
+	selected, _, _ = accountAvatars(account, identities)
+	if selected == nil || selected.Source != "github" {
+		t.Fatalf("missing selection did not fall back: %+v", selected)
+	}
+	response = avatarRequest(s, "GET", "/v1/whoami", credential.Token, "", nil, 0)
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"source":"github"`) || strings.Contains(response.Body.String(), "profile-avatars/github.png") {
+		t.Fatalf("whoami did not return a private source description: %s", response.Body.String())
+	}
+}

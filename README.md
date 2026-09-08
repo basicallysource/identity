@@ -21,8 +21,9 @@ Accept a bearer token, forward it:
       "handle": "octocat",
       "created_at": "2026-08-27T00:00:00Z",
       "identities": [
-        {"provider": "github", "id": "583231", "handle": "octocat", "proved_at": "..."}
+        {"provider": "github", "id": "583231", "handle": "octocat", "proved_at": "...", "avatar": {"id": "...", "width": 460, "height": 460, "source": "github"}}
       ],
+      "avatar": {"id": "...", "width": 460, "height": 460, "source": "github"},
       "token": {"id": "...", "name": "...", "audience": "https://app.example.com", "expires_at": "..."}
     }
 
@@ -103,17 +104,24 @@ images before any storage request. Only one image upload runs at a time.
 
 The original bytes are saved privately in the asset service, which builds its
 normal rendition ladder. Configure that worker's image widths to include
-thumbnail sizes such as 64, 128 and 256 for small account pictures. Whoami adds
-`avatar: {id, width, height}` when a photo exists and `avatar_upload_enabled`.
+thumbnail sizes such as 64, 128 and 256 for small account pictures. GitHub and
+Discord pictures are copied into the same private store the first time each
+identity signs in or is linked. Whoami describes each available provider picture
+and adds the selected `avatar: {id, width, height, source}`. With no explicit
+selection, Identity uses the first linked account with a picture and skips nulls.
+`PUT /v1/avatar {"source":"discord"}` selects a provider picture; uploading a
+photo selects `upload`. The response also includes `uploaded_avatar` when present
+and `avatar_upload_enabled`.
 No private storage URL or asset-service credential is returned to the browser.
 
 `GET /v1/avatar?size=128` authenticates the caller and streams the smallest
 available image large enough for that square display size. It accounts for
 both dimensions when the photo is not square, and falls back to the largest
 available image if needed. Applications should use the desired rendered size
-times the display's pixel ratio, typically through `srcset`. Responses are
-private and not cached. `DELETE /v1/avatar` removes the account's photo reference;
-immutable original assets remain private in storage.
+times the display's pixel ratio, typically through `srcset`. A `source` query
+selects one of the caller's described pictures for a picker preview. Responses
+are private and not cached. `DELETE /v1/avatar` removes only the uploaded picture;
+provider pictures remain available and immutable original assets remain private.
 
 Every avatar operation is for the authenticated account only. There is no
 account-ID parameter or public avatar route. Browser applications proxy this

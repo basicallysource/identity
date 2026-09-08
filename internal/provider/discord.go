@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -103,8 +104,10 @@ func (d *Discord) user(ctx context.Context, token string) (User, error) {
 	}
 
 	var body struct {
-		ID       string `json:"id"`
-		Username string `json:"username"`
+		ID            string `json:"id"`
+		Username      string `json:"username"`
+		Avatar        string `json:"avatar"`
+		Discriminator string `json:"discriminator"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
 		return User{}, fmt.Errorf("provider: read Discord's answer: %w", err)
@@ -112,7 +115,17 @@ func (d *Discord) user(ctx context.Context, token string) (User, error) {
 	if body.ID == "" || body.Username == "" {
 		return User{}, errors.New("provider: Discord returned an empty identity")
 	}
-	return User{ID: body.ID, Handle: body.Username}, nil
+	avatar_url := ""
+	if body.Avatar != "" {
+		avatar_url = "https://cdn.discordapp.com/avatars/" + url.PathEscape(body.ID) + "/" + url.PathEscape(body.Avatar) + ".png?size=1024"
+	} else if id, err := strconv.ParseUint(body.ID, 10, 64); err == nil {
+		index := (id >> 22) % 6
+		if discriminator, err := strconv.ParseUint(body.Discriminator, 10, 64); err == nil && discriminator != 0 {
+			index = discriminator % 5
+		}
+		avatar_url = fmt.Sprintf("https://cdn.discordapp.com/embed/avatars/%d.png", index)
+	}
+	return User{ID: body.ID, Handle: body.Username, AvatarURL: avatar_url}, nil
 }
 
 func (d *Discord) client() *http.Client {

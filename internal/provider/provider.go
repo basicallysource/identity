@@ -18,8 +18,9 @@ const (
 // immutable id (GitHub's numeric id, Discord's snowflake), because a login
 // can be renamed and the old name taken by somebody else.
 type User struct {
-	ID     string
-	Handle string
+	ID        string
+	Handle    string
+	AvatarURL string
 }
 
 // ErrUnconfigured means the provider's client credentials were not set, so

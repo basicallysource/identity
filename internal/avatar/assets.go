@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -16,6 +17,7 @@ import (
 
 var NAMESPACE_PATTERN = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 var KEY_PATTERN = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[A-Za-z0-9._-]+$`)
+var DISCORD_DEFAULT_AVATAR_PATTERN = regexp.MustCompile(`^/embed/avatars/[0-5]\.png$`)
 
 type Assets struct {
 	base_url, token, namespace, storage_origin string
@@ -74,6 +76,45 @@ func (a *Assets) Upload(ctx context.Context, raw []byte, content_type, extension
 	query := url.Values{"namespace": {a.namespace}, "visibility": {"private"}, "filename": {"avatar" + extension}}
 	result, err := a.manifest(ctx, "POST", "/v1/assets?"+query.Encode(), content_type, bytes.NewReader(raw))
 	return result.Key, err
+}
+
+func (a *Assets) ProviderImage(ctx context.Context, provider, provider_id, source_url string, max_bytes int64) ([]byte, string, error) {
+	u, err := url.Parse(source_url)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || !validProviderURL(provider, provider_id, u) {
+		return nil, "", errors.New("invalid provider image URL")
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", source_url, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, "", errors.New("provider image unavailable")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.ContentLength > max_bytes {
+		return nil, "", errors.New("provider image unavailable")
+	}
+	content_type, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if content_type != "image/jpeg" && content_type != "image/png" && content_type != "image/webp" {
+		return nil, "", errors.New("unsupported provider image")
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, max_bytes+1))
+	if err != nil || int64(len(raw)) > max_bytes {
+		return nil, "", errors.New("provider image is too large")
+	}
+	return raw, content_type, nil
+}
+
+func validProviderURL(provider, provider_id string, u *url.URL) bool {
+	switch provider {
+	case "github":
+		return u.Host == "avatars.githubusercontent.com" && u.Path == "/u/"+provider_id
+	case "discord":
+		return u.Host == "cdn.discordapp.com" && ((strings.HasPrefix(u.Path, "/avatars/"+provider_id+"/") && strings.HasSuffix(u.Path, ".png")) || DISCORD_DEFAULT_AVATAR_PATTERN.MatchString(u.Path))
+	default:
+		return false
+	}
 }
 
 func (a *Assets) Image(ctx context.Context, key string, size int) (*http.Response, error) {

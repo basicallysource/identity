@@ -146,8 +146,9 @@ func (g *GitHub) user(ctx context.Context, token string) (User, error) {
 	}
 
 	var body struct {
-		ID    int64  `json:"id"`
-		Login string `json:"login"`
+		ID        int64  `json:"id"`
+		Login     string `json:"login"`
+		AvatarURL string `json:"avatar_url"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
 		return User{}, fmt.Errorf("provider: read GitHub's answer: %w", err)
@@ -155,7 +156,7 @@ func (g *GitHub) user(ctx context.Context, token string) (User, error) {
 	if body.ID == 0 || body.Login == "" {
 		return User{}, errors.New("provider: GitHub returned an empty identity")
 	}
-	return User{ID: strconv.FormatInt(body.ID, 10), Handle: body.Login}, nil
+	return User{ID: strconv.FormatInt(body.ID, 10), Handle: body.Login, AvatarURL: body.AvatarURL}, nil
 }
 
 func (g *GitHub) client() *http.Client {

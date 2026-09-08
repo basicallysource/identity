@@ -190,6 +190,7 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 			s.logger().Error("sign-in: discord link", "error", err)
 			s.callbackPage(w, callbackView{Error: "could not record the link"})
 		default:
+			s.saveProviderAvatar(r.Context(), provider.NameDiscord, user)
 			s.logger().Info("linked an identity", "account", flow.accountID, "provider", provider.NameDiscord, "handle", user.Handle)
 			s.callbackPage(w, callbackView{Linked: true})
 		}
@@ -202,6 +203,7 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 		s.callbackPage(w, callbackView{Error: "could not record the sign-in"})
 		return
 	}
+	s.saveProviderAvatar(r.Context(), provider.NameDiscord, user)
 	minted, err := s.issue(r, account, "", "")
 	if err != nil {
 		s.callbackPage(w, callbackView{Error: "could not issue a token: " + err.Error()})
@@ -223,6 +225,7 @@ func (s *Server) finishSignIn(w http.ResponseWriter, r *http.Request, providerNa
 		writeError(w, http.StatusInternalServerError, "could not record the sign-in")
 		return
 	}
+	s.saveProviderAvatar(r.Context(), providerName, user)
 	minted, err := s.issue(r, account, "", "")
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
@@ -245,6 +248,7 @@ func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, accountID, p
 		s.logger().Error("sign-in: link", "provider", providerName, "error", err)
 		writeError(w, http.StatusInternalServerError, "could not record the link")
 	default:
+		s.saveProviderAvatar(r.Context(), providerName, user)
 		s.logger().Info("linked an identity", "account", accountID, "provider", providerName, "handle", user.Handle)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"linked":   true,

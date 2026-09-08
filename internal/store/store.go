@@ -2,9 +2,10 @@
 // prove them, and which tokens speak for them.
 //
 // The shape is three tables. An account is the person; it owns an id, a display
-// handle, and a private profile-photo reference. An identity is one proof at a
+// handle, and an optional uploaded profile photo. An identity is one proof at a
 // provider (github, discord), keyed by the provider's own immutable id, never
-// by a login that can be renamed and re-registered. A token is an opaque
+// by a login that can be renamed and re-registered, plus that provider's private
+// profile-photo copy. A token is an opaque
 // credential this service minted; its secret is stored only as a hash.
 package store
 
@@ -15,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -37,17 +39,21 @@ type Account struct {
 	AvatarKey    string
 	AvatarWidth  int
 	AvatarHeight int
+	AvatarSource string
 }
 
 // Identity is one provider's proof of an account. ProviderID is the
 // provider's immutable id (GitHub's numeric id, Discord's snowflake), and
 // Handle is the human-readable name at the time of the last proof.
 type Identity struct {
-	Provider   string
-	ProviderID string
-	AccountID  string
-	Handle     string
-	ProvedAt   time.Time
+	Provider     string
+	ProviderID   string
+	AccountID    string
+	Handle       string
+	ProvedAt     time.Time
+	AvatarKey    string
+	AvatarWidth  int
+	AvatarHeight int
 }
 
 // Token is a credential as the store holds it: id in the clear, secret only
@@ -127,6 +133,20 @@ COMMIT;`); err != nil {
 			return nil, err
 		}
 	}
+	if schema_version < 3 {
+		if _, err := db.Exec(`BEGIN;
+ALTER TABLE accounts ADD COLUMN avatar_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE identities ADD COLUMN avatar_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE identities ADD COLUMN avatar_width INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE identities ADD COLUMN avatar_height INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE identities ADD COLUMN linked_at TEXT NOT NULL DEFAULT '';
+UPDATE identities SET linked_at=proved_at WHERE linked_at='';
+PRAGMA user_version = 3;
+COMMIT;`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return &DB{sql: db}, nil
 }
 
@@ -190,9 +210,9 @@ func (db *DB) SignIn(ctx context.Context, provider, providerID, handle string) (
 			return Account{}, fmt.Errorf("store: create account: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO identities (provider, provider_id, account_id, handle, proved_at)
-			 VALUES (?, ?, ?, ?, ?)`,
-			provider, providerID, accountID, handle, stamp); err != nil {
+			`INSERT INTO identities (provider, provider_id, account_id, handle, proved_at, linked_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			provider, providerID, accountID, handle, stamp, stamp); err != nil {
 			return Account{}, fmt.Errorf("store: create identity: %w", err)
 		}
 	case err != nil:
@@ -237,9 +257,9 @@ func (db *DB) Link(ctx context.Context, accountID, provider, providerID, handle 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO identities (provider, provider_id, account_id, handle, proved_at)
-			 VALUES (?, ?, ?, ?, ?)`,
-			provider, providerID, accountID, handle, stamp); err != nil {
+			`INSERT INTO identities (provider, provider_id, account_id, handle, proved_at, linked_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			provider, providerID, accountID, handle, stamp, stamp); err != nil {
 			return fmt.Errorf("store: link identity: %w", err)
 		}
 	case err != nil:
@@ -272,8 +292,8 @@ func accountByID(ctx context.Context, q querier, id string) (Account, error) {
 	var a Account
 	var created string
 	err := q.QueryRowContext(ctx,
-		`SELECT id, handle, created_at, avatar_key, avatar_width, avatar_height FROM accounts WHERE id = ?`, id).
-		Scan(&a.ID, &a.Handle, &created, &a.AvatarKey, &a.AvatarWidth, &a.AvatarHeight)
+		`SELECT id, handle, created_at, avatar_key, avatar_width, avatar_height, avatar_source FROM accounts WHERE id = ?`, id).
+		Scan(&a.ID, &a.Handle, &created, &a.AvatarKey, &a.AvatarWidth, &a.AvatarHeight, &a.AvatarSource)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -285,15 +305,50 @@ func accountByID(ctx context.Context, q querier, id string) (Account, error) {
 }
 
 func (db *DB) SetAvatar(ctx context.Context, account_id, key string, width, height int) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE accounts SET avatar_key=?, avatar_width=?, avatar_height=?, updated_at=? WHERE id=?`, key, width, height, time.Now().UTC().Format(time.RFC3339Nano), account_id)
+	if key == "" {
+		_, err := db.sql.ExecContext(ctx, `UPDATE accounts SET avatar_key='', avatar_width=0, avatar_height=0, avatar_source=CASE WHEN avatar_source='upload' THEN '' ELSE avatar_source END, updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), account_id)
+		return err
+	}
+	_, err := db.sql.ExecContext(ctx, `UPDATE accounts SET avatar_key=?, avatar_width=?, avatar_height=?, avatar_source='upload', updated_at=? WHERE id=?`, key, width, height, time.Now().UTC().Format(time.RFC3339Nano), account_id)
+	return err
+}
+
+func (db *DB) SetIdentityAvatar(ctx context.Context, provider, provider_id, key string, width, height int) error {
+	_, err := db.sql.ExecContext(ctx, `UPDATE identities SET avatar_key=?, avatar_width=?, avatar_height=? WHERE provider=? AND provider_id=?`, key, width, height, provider, provider_id)
+	return err
+}
+
+func (db *DB) HasIdentityAvatar(ctx context.Context, provider, provider_id string) bool {
+	var exists int
+	err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM identities WHERE provider=? AND provider_id=? AND avatar_key<>''`, provider, provider_id).Scan(&exists)
+	return err == nil && exists == 1
+}
+
+func (db *DB) SelectAvatar(ctx context.Context, account_id, source string) error {
+	var exists int
+	if source == "upload" {
+		err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts WHERE id=? AND avatar_key<>''`, account_id).Scan(&exists)
+		if err != nil || exists != 1 {
+			return ErrNotFound
+		}
+	} else {
+		if source == "" || strings.Contains(source, ":") {
+			return ErrNotFound
+		}
+		err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM identities WHERE account_id=? AND provider=? AND avatar_key<>''`, account_id, source).Scan(&exists)
+		if err != nil || exists < 1 {
+			return ErrNotFound
+		}
+	}
+	_, err := db.sql.ExecContext(ctx, `UPDATE accounts SET avatar_source=?, updated_at=? WHERE id=?`, source, time.Now().UTC().Format(time.RFC3339Nano), account_id)
 	return err
 }
 
 // IdentitiesFor lists an account's proofs, oldest first.
 func (db *DB) IdentitiesFor(ctx context.Context, accountID string) ([]Identity, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT provider, provider_id, account_id, handle, proved_at FROM identities
-		 WHERE account_id = ? ORDER BY proved_at ASC`, accountID)
+		`SELECT provider, provider_id, account_id, handle, proved_at, avatar_key, avatar_width, avatar_height FROM identities
+		 WHERE account_id = ? ORDER BY linked_at ASC`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("store: identities for %s: %w", accountID, err)
 	}
@@ -303,7 +358,7 @@ func (db *DB) IdentitiesFor(ctx context.Context, accountID string) ([]Identity, 
 	for rows.Next() {
 		var i Identity
 		var proved string
-		if err := rows.Scan(&i.Provider, &i.ProviderID, &i.AccountID, &i.Handle, &proved); err != nil {
+		if err := rows.Scan(&i.Provider, &i.ProviderID, &i.AccountID, &i.Handle, &proved, &i.AvatarKey, &i.AvatarWidth, &i.AvatarHeight); err != nil {
 			return nil, fmt.Errorf("store: read identity: %w", err)
 		}
 		i.ProvedAt, _ = time.Parse(time.RFC3339Nano, proved)

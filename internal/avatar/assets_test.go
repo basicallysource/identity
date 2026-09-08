@@ -5,8 +5,32 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
+
+func TestProviderImageURLsAreScoped(t *testing.T) {
+	for _, test := range []struct {
+		provider, id, raw string
+		want              bool
+	}{
+		{"github", "583231", "https://avatars.githubusercontent.com/u/583231?v=4", true},
+		{"github", "583231", "https://avatars.githubusercontent.com/u/583231/extra", false},
+		{"github", "583231", "https://example.com/u/583231", false},
+		{"discord", "123", "https://cdn.discordapp.com/avatars/123/hash.png?size=1024", true},
+		{"discord", "123", "https://cdn.discordapp.com/avatars/456/hash.png", false},
+		{"discord", "123", "https://cdn.discordapp.com/embed/avatars/5.png", true},
+		{"discord", "123", "https://cdn.discordapp.com/embed/avatars/6.png", false},
+	} {
+		u, err := url.Parse(test.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := validProviderURL(test.provider, test.id, u); got != test.want {
+			t.Fatalf("validProviderURL(%q)=%v, want %v", test.raw, got, test.want)
+		}
+	}
+}
 
 func TestPrivateManifestAndStorageBoundary(t *testing.T) {
 	for _, mode := range []string{"public", "permanent URL", "wrong key", "other namespace", "foreign origin", "redirect", "HTML"} {
