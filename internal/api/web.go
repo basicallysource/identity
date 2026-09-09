@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"html/template"
 	"net/http"
 	"strconv"
@@ -21,7 +23,27 @@ import (
 //go:embed web/*.html web/style.css web/htmx.min.js
 var webFiles embed.FS
 
+// Static files are served under a content hash, /static/<hash>/<name>, and
+// told to be cached forever. A changed file is a new URL, so no cache
+// between here and the browser (a CDN in front rewrites Cache-Control
+// on .css, and did) can ever serve a stale one against a new page.
+var assets = map[string]string{}
+
+func init() {
+	for _, name := range []string{"style.css", "htmx.min.js"} {
+		body, err := webFiles.ReadFile("web/" + name)
+		if err != nil {
+			panic(err)
+		}
+		sum := sha256.Sum256(body)
+		assets[name] = hex.EncodeToString(sum[:8])
+	}
+}
+
+func assetURL(name string) string { return "/static/" + assets[name] + "/" + name }
+
 var templates = template.Must(template.New("").Funcs(template.FuncMap{
+	"asset": assetURL,
 	"date": func(t time.Time) string {
 		if t.IsZero() {
 			return ""
@@ -90,12 +112,22 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, data vie
 	w.Write(out.Bytes())
 }
 
-func (s *Server) stylesheet(w http.ResponseWriter, r *http.Request) {
-	serveEmbedded(w, "web/style.css", "text/css; charset=utf-8")
-}
-
-func (s *Server) script(w http.ResponseWriter, r *http.Request) {
-	serveEmbedded(w, "web/htmx.min.js", "text/javascript; charset=utf-8")
+// static serves one embedded file under its content hash. A URL with any
+// other hash is a stale reference and gets 404, never a wrong file.
+func (s *Server) static(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("file")
+	if hash, ok := assets[name]; !ok || hash != r.PathValue("hash") {
+		http.NotFound(w, r)
+		return
+	}
+	body, _ := webFiles.ReadFile("web/" + name)
+	contentType := "text/css; charset=utf-8"
+	if strings.HasSuffix(name, ".js") {
+		contentType = "text/javascript; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write(body)
 }
 
 // callbackPage answers the Discord callback: a link sends the browser to
@@ -107,15 +139,4 @@ func (s *Server) callbackPage(w http.ResponseWriter, view_ callbackView) {
 		return
 	}
 	s.render(w, http.StatusOK, "page", view{Providers: s.providerFlags(), Error: view_.Error})
-}
-
-func serveEmbedded(w http.ResponseWriter, name, contentType string) {
-	body, err := webFiles.ReadFile(name)
-	if err != nil {
-		http.Error(w, "missing page", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(body)
 }

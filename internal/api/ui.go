@@ -40,10 +40,19 @@ type authorizeRequest struct {
 // Host is where the person will be sent, for the page to say so.
 func (a authorizeRequest) Host() string { return redirectHost(a.RedirectURI) }
 
+// The page has tabs, one URL each, plain links between them: "account" at
+// / is everybody's, "groups" at /groups is identity-admin's. A tab is a
+// full page render; only the parts inside a tab change without a reload.
+const (
+	tabAccount = "account"
+	tabGroups  = "groups"
+)
+
 // view is everything a template can see. Fragments use the slice of it
 // they need; the full page gets all of it.
 type view struct {
 	Me        *whoamiResponse
+	Tab       string
 	Providers map[string]bool
 	Tokens    []tokenRow
 	Admin     bool
@@ -77,18 +86,39 @@ func (s *Server) signedInView(r *http.Request, account store.Account, credential
 	if err != nil {
 		return view{}, err
 	}
-	v := view{Me: &me, Providers: s.providerFlags(), Tokens: tokens}
+	v := view{Me: &me, Tab: tabAccount, Providers: s.providerFlags(), Tokens: tokens}
 	for _, g := range me.Groups {
 		if g == store.AdminGroup {
 			v.Admin = true
 		}
 	}
-	if v.Admin {
-		if err := s.fillGroups(r, &v); err != nil {
-			return view{}, err
-		}
-	}
 	return v, nil
+}
+
+// groupsPage is the groups tab, for identity-admin. Anybody else is sent
+// to the account tab, which is the only one they have.
+func (s *Server) groupsPage(w http.ResponseWriter, r *http.Request) {
+	account, credential, signedIn := s.viewer(r)
+	if !signedIn {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	v, err := s.signedInView(r, account, credential)
+	if err != nil {
+		s.logger().Error("page: groups", "error", err)
+		s.render(w, http.StatusInternalServerError, "page", view{Providers: s.providerFlags(), Error: "could not read the account"})
+		return
+	}
+	if !v.Admin {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	v.Tab = tabGroups
+	if err := s.fillGroups(r, &v); err != nil {
+		s.logger().Error("page: groups", "error", err)
+		v.Error = "could not read the groups"
+	}
+	s.render(w, http.StatusOK, "page", v)
 }
 
 func (s *Server) fillGroups(r *http.Request, v *view) error {
@@ -446,13 +476,6 @@ func (s *Server) groupSection(w http.ResponseWriter, r *http.Request, name strin
 		v.Error, status = fail.message, fail.status
 	}
 	s.render(w, status, "group", v)
-}
-
-func (s *Server) uiGroups(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.admin(w, r); !ok {
-		return
-	}
-	s.groupsSection(w, r, nil)
 }
 
 func (s *Server) uiCreateGroup(w http.ResponseWriter, r *http.Request) {

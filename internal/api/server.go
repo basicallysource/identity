@@ -99,8 +99,8 @@ func (s *Server) routes() []route {
 		// The page itself handles an authorize request; the route exists so a
 		// consuming service has a name to send the browser to.
 		{"GET", "/authorize", routePage, s.page},
-		{"GET", "/style.css", routeStatic, s.stylesheet},
-		{"GET", "/htmx.min.js", routeStatic, s.script},
+		{"GET", "/groups", routePage, s.groupsPage},
+		{"GET", "/static/{hash}/{file}", routeStatic, s.static},
 
 		// The page's own fragments (ui.go). HTML in, HTML out, cookie session.
 		{"POST", "/ui/signin/github", routePage, s.uiGitHubStart},
@@ -112,7 +112,6 @@ func (s *Server) routes() []route {
 		{"POST", "/ui/avatar", routePage, s.uiUploadAvatar},
 		{"POST", "/ui/avatar/select", routePage, s.uiSelectAvatar},
 		{"POST", "/ui/avatar/delete", routePage, s.uiDeleteAvatar},
-		{"GET", "/ui/groups", routePage, s.uiGroups},
 		{"POST", "/ui/groups", routePage, s.uiCreateGroup},
 		{"GET", "/ui/groups/{name}", routePage, s.uiGroup},
 		{"POST", "/ui/groups/{name}/delete", routePage, s.uiDeleteGroup},

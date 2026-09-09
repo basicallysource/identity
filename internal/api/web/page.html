@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content='{"allowEval":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"defaultSwapStyle":"innerHTML"}'>
 <title>identity</title>
-<link rel="stylesheet" href="/style.css">
-<script src="/htmx.min.js" defer></script>
+<link rel="stylesheet" href="{{asset "style.css"}}">
+<script src="{{asset "htmx.min.js"}}" defer></script>
 </head>
 <body class="min-h-full bg-neutral-50 text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100">
 <main class="mx-auto flex max-w-2xl flex-col gap-10 px-5 py-10 sm:py-16">
@@ -53,6 +53,16 @@
 {{template "error" .}}
 <p>Signed in as <strong>{{.Me.Handle}}</strong> <span class="font-mono text-sm text-neutral-500">({{.Me.Account}})</span></p>
 
+{{if .Admin}}
+<nav class="tabs" aria-label="Tabs">
+  <a class="tab{{if eq .Tab "account"}} active{{end}}" href="/">account</a>
+  <a class="tab{{if eq .Tab "groups"}} active{{end}}" href="/groups">groups</a>
+</nav>
+{{end}}
+
+{{if eq .Tab "groups"}}
+<section id="groups" class="stack">{{template "groups" .}}</section>
+{{else}}
 {{if .Me.AvatarUploadEnabled}}
 <section id="photo">{{template "photo" .}}</section>
 {{end}}
@@ -76,9 +86,6 @@
 </section>
 
 <section id="tokens">{{template "tokens" .}}</section>
-
-{{if .Admin}}
-<section id="groups" class="stack">{{template "groups" .}}</section>
 {{end}}
 {{end}}
 

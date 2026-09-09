@@ -99,11 +99,25 @@ func TestPageSignsInThroughTheDeviceFlow(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(body, "Signed in as <strong>octocat</strong>") || !strings.Contains(body, "Sign out") {
 		t.Fatalf("signed-in page: %d\n%s", status, body)
 	}
-	if strings.Contains(body, "manage groups") {
-		t.Fatal("a non-admin sees group administration")
+	if strings.Contains(body, `href="/groups"`) || strings.Contains(body, "manage groups") {
+		t.Fatal("a non-admin sees the groups tab")
 	}
 	if strings.Contains(body, b.cookies["identity_session"].Value) {
 		t.Fatal("the session token is in the page")
+	}
+
+	// Static files are referenced by content hash and cached forever; any
+	// other hash is 404, never a stale file.
+	css := assetURL("style.css")
+	if !strings.Contains(body, `href="`+css+`"`) || !strings.Contains(body, `src="`+assetURL("htmx.min.js")+`"`) {
+		t.Fatalf("page does not reference the hashed assets:\n%s", body[:600])
+	}
+	status, body, header := b.page(http.MethodGet, css, nil)
+	if status != http.StatusOK || !strings.HasPrefix(body, "/*! tailwindcss") || header.Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("stylesheet: %d %q", status, header.Get("Cache-Control"))
+	}
+	if status, _, _ := b.page(http.MethodGet, "/static/0000000000000000/style.css", nil); status != http.StatusNotFound {
+		t.Fatalf("a stale asset URL answered %d", status)
 	}
 
 	// Tokens: mint one through the fragment, see it once, revoke it.
@@ -127,7 +141,7 @@ func TestPageSignsInThroughTheDeviceFlow(t *testing.T) {
 	}
 
 	// Signing out clears the cookie and the next page is the front.
-	status, _, header := b.page(http.MethodPost, "/ui/signout", url.Values{})
+	status, _, header = b.page(http.MethodPost, "/ui/signout", url.Values{})
 	if status != http.StatusSeeOther || header.Get("Location") != "/" {
 		t.Fatalf("sign out: %d %v", status, header)
 	}
@@ -217,18 +231,28 @@ func TestPageGroupAdministration(t *testing.T) {
 	b := newBrowser(t, ts)
 	b.signInViaPage()
 
-	// Not an admin: the fragment refuses.
-	status, body, _ := b.page(http.MethodGet, "/ui/groups", nil)
+	// Not an admin: the groups tab sends them back to the only tab they
+	// have, and the fragments refuse.
+	status, _, header := b.page(http.MethodGet, "/groups", nil)
+	if status != http.StatusSeeOther || header.Get("Location") != "/" {
+		t.Fatalf("non-admin groups tab: %d %q", status, header.Get("Location"))
+	}
+	status, body, _ := b.page(http.MethodPost, "/ui/groups", url.Values{"name": {"core"}})
 	if status != http.StatusForbidden || !strings.Contains(body, store.AdminGroup) {
 		t.Fatalf("non-admin groups fragment: %d\n%s", status, body)
 	}
 
-	// Made an admin at the terminal, the page shows the section.
+	// Made an admin at the terminal, the account tab grows a tab bar and
+	// the groups tab is a page.
 	me := decode[whoamiResponse](t, do(t, "GET", ts.URL+"/v1/whoami", b.cookies["identity_session"].Value, ""))
 	makeAdmin(t, server, me.Account)
 	status, body, _ = b.page(http.MethodGet, "/", nil)
-	if status != http.StatusOK || !strings.Contains(body, "manage groups") || !strings.Contains(body, `<li class="chip">identity-admin</li>`) {
-		t.Fatalf("admin page: %d\n%s", status, body)
+	if status != http.StatusOK || !strings.Contains(body, `class="tab active" href="/"`) || !strings.Contains(body, `href="/groups"`) || !strings.Contains(body, `<li class="chip">identity-admin</li>`) || strings.Contains(body, "manage groups") {
+		t.Fatalf("admin account tab: %d\n%s", status, body)
+	}
+	status, body, _ = b.page(http.MethodGet, "/groups", nil)
+	if status != http.StatusOK || !strings.Contains(body, `class="tab active" href="/groups"`) || !strings.Contains(body, "manage groups") || strings.Contains(body, `id="tokens"`) {
+		t.Fatalf("groups tab: %d\n%s", status, body)
 	}
 
 	// Create a group, open it, find somebody, add them, remove them, delete it.
