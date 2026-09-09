@@ -131,15 +131,26 @@ func TestResolveAndSearchAccounts(t *testing.T) {
 		t.Fatalf("an unknown handle: %v", err)
 	}
 
-	matches, err := db.SearchAccounts(ctx, "octo", 10)
-	if err != nil || len(matches) != 2 {
-		t.Fatalf("search = %d matches, %v", len(matches), err)
+	matches, total, err := db.SearchAccounts(ctx, "octo", 0, 10)
+	if err != nil || len(matches) != 2 || total != 2 {
+		t.Fatalf("search = %d matches of %d, %v", len(matches), total, err)
 	}
 	ids := map[string]bool{matches[0].Account.ID: true, matches[1].Account.ID: true}
 	if !ids[gh.ID] || !ids[dc.ID] {
 		t.Fatalf("search found %v", ids)
 	}
-	if all, _ := db.SearchAccounts(ctx, "", 10); len(all) != 3 {
-		t.Fatalf("empty search lists %d, want 3", len(all))
+	if all, total, _ := db.SearchAccounts(ctx, "", 0, 10); len(all) != 3 || total != 3 {
+		t.Fatalf("empty search lists %d of %d, want 3", len(all), total)
+	}
+
+	// Pages: newest first, the total is the whole match, and an offset past
+	// the end is an empty page rather than an error.
+	first, total, _ := db.SearchAccounts(ctx, "", 0, 2)
+	second, _, _ := db.SearchAccounts(ctx, "", 2, 2)
+	if total != 3 || len(first) != 2 || len(second) != 1 || first[0].Account.ID != other.ID {
+		t.Fatalf("pages: first %d second %d total %d, first is %s", len(first), len(second), total, first[0].Account.Handle)
+	}
+	if past, _, _ := db.SearchAccounts(ctx, "", 30, 2); len(past) != 0 {
+		t.Fatalf("a page past the end has %d rows", len(past))
 	}
 }

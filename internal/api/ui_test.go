@@ -233,9 +233,11 @@ func TestPageGroupAdministration(t *testing.T) {
 
 	// Not an admin: the groups tab sends them back to the only tab they
 	// have, and the fragments refuse.
-	status, _, header := b.page(http.MethodGet, "/groups", nil)
-	if status != http.StatusSeeOther || header.Get("Location") != "/" {
-		t.Fatalf("non-admin groups tab: %d %q", status, header.Get("Location"))
+	for _, tab := range []string{"/groups", "/accounts"} {
+		status, _, header := b.page(http.MethodGet, tab, nil)
+		if status != http.StatusSeeOther || header.Get("Location") != "/" {
+			t.Fatalf("non-admin %s: %d %q", tab, status, header.Get("Location"))
+		}
 	}
 	status, body, _ := b.page(http.MethodPost, "/ui/groups", url.Values{"name": {"core"}})
 	if status != http.StatusForbidden || !strings.Contains(body, store.AdminGroup) {
@@ -253,6 +255,25 @@ func TestPageGroupAdministration(t *testing.T) {
 	status, body, _ = b.page(http.MethodGet, "/groups", nil)
 	if status != http.StatusOK || !strings.Contains(body, `class="tab active" href="/groups"`) || !strings.Contains(body, "manage groups") || strings.Contains(body, `id="tokens"`) {
 		t.Fatalf("groups tab: %d\n%s", status, body)
+	}
+
+	// The accounts tab: the whole roster, newest first, a page at a time.
+	for i := range 30 {
+		if _, err := server.Store.SignIn(t.Context(), "github", fmt.Sprintf("%d", 1000+i), fmt.Sprintf("person-%02d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, body, _ = b.page(http.MethodGet, "/accounts", nil)
+	if status != http.StatusOK || !strings.Contains(body, `class="tab active" href="/accounts"`) || !strings.Contains(body, "1–25 of 31 accounts") || !strings.Contains(body, "person-29") || strings.Contains(body, "person-04") || !strings.Contains(body, `href="/accounts?page=2"`) {
+		t.Fatalf("accounts tab page 1: %d\n%s", status, body)
+	}
+	status, body, _ = b.page(http.MethodGet, "/accounts?page=2", nil)
+	if status != http.StatusOK || !strings.Contains(body, "26–31 of 31") || !strings.Contains(body, "person-04") || !strings.Contains(body, "octocat") || !strings.Contains(body, `href="/accounts"`) || strings.Contains(body, "page=3") {
+		t.Fatalf("accounts tab page 2: %d\n%s", status, body)
+	}
+	status, body, _ = b.page(http.MethodGet, "/accounts?q=person-1", nil)
+	if status != http.StatusOK || !strings.Contains(body, "1–10 of 10 accounts") || !strings.Contains(body, "person-19") || strings.Contains(body, "person-20") {
+		t.Fatalf("accounts tab search: %d\n%s", status, body)
 	}
 
 	// Create a group, open it, find somebody, add them, remove them, delete it.

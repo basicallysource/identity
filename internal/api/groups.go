@@ -245,7 +245,8 @@ func (s *Server) searchAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	matches, err := s.Store.SearchAccounts(r.Context(), strings.TrimSpace(r.URL.Query().Get("q")), limit)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	matches, total, err := s.Store.SearchAccounts(r.Context(), strings.TrimSpace(r.URL.Query().Get("q")), offset, limit)
 	if err != nil {
 		s.logger().Error("accounts: search", "error", err)
 		writeError(w, http.StatusInternalServerError, "could not search accounts")
@@ -265,5 +266,5 @@ func (s *Server) searchAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, body)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": rows})
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": rows, "total": total})
 }

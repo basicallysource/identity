@@ -377,28 +377,35 @@ type AccountMatch struct {
 }
 
 // SearchAccounts finds accounts whose handle, or any of whose provider
-// handles, contains q. Case-insensitive, at most limit results, by handle.
-// An empty q lists the newest accounts, which is how a short roster is
-// browsed at all.
-func (db *DB) SearchAccounts(ctx context.Context, q string, limit int) ([]AccountMatch, error) {
+// handles, contains q. Case-insensitive, newest first, one page of limit
+// from offset, plus how many match in all so a caller can page. An empty
+// q is the whole roster, which is how it is browsed.
+func (db *DB) SearchAccounts(ctx context.Context, q string, offset, limit int) ([]AccountMatch, int, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	pattern := "%" + strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(strings.TrimSpace(q)), "%", ""), "_", "") + "%"
-	rows, err := db.sql.QueryContext(ctx, `
-		SELECT DISTINCT a.id FROM accounts a
-		LEFT JOIN identities i ON i.account_id = a.id
-		WHERE lower(a.handle) LIKE ? OR lower(i.handle) LIKE ?
-		ORDER BY a.created_at DESC LIMIT ?`, pattern, pattern, limit)
+	const matching = `FROM accounts a LEFT JOIN identities i ON i.account_id = a.id
+		WHERE lower(a.handle) LIKE ? OR lower(i.handle) LIKE ?`
+
+	var total int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(DISTINCT a.id) `+matching, pattern, pattern).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("store: count accounts: %w", err)
+	}
+	rows, err := db.sql.QueryContext(ctx, `SELECT a.id, MAX(a.created_at) `+matching+`
+		GROUP BY a.id ORDER BY 2 DESC, a.id LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("store: search accounts: %w", err)
+		return nil, 0, fmt.Errorf("store: search accounts: %w", err)
 	}
 	var ids []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, created string
+		if err := rows.Scan(&id, &created); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("store: read search: %w", err)
+			return nil, 0, fmt.Errorf("store: read search: %w", err)
 		}
 		ids = append(ids, id)
 	}
@@ -408,15 +415,15 @@ func (db *DB) SearchAccounts(ctx context.Context, q string, limit int) ([]Accoun
 	for _, id := range ids {
 		account, err := db.AccountByID(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		identities, err := db.IdentitiesFor(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		matches = append(matches, AccountMatch{Account: account, Identities: identities})
 	}
-	return matches, nil
+	return matches, total, nil
 }
 
 // ResolveAccount turns what an operator typed into exactly one account: an

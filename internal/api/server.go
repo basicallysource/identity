@@ -100,6 +100,7 @@ func (s *Server) routes() []route {
 		// consuming service has a name to send the browser to.
 		{"GET", "/authorize", routePage, s.page},
 		{"GET", "/groups", routePage, s.groupsPage},
+		{"GET", "/accounts", routePage, s.accountsPage},
 		{"GET", "/static/{hash}/{file}", routeStatic, s.static},
 
 		// The page's own fragments (ui.go). HTML in, HTML out, cookie session.

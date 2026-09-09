@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,9 +45,19 @@ func (a authorizeRequest) Host() string { return redirectHost(a.RedirectURI) }
 // / is everybody's, "groups" at /groups is identity-admin's. A tab is a
 // full page render; only the parts inside a tab change without a reload.
 const (
-	tabAccount = "account"
-	tabGroups  = "groups"
+	tabMe       = "me"
+	tabGroups   = "groups"
+	tabAccounts = "accounts"
 )
+
+// accountsPageSize is how many accounts the accounts tab shows at once.
+const accountsPageSize = 25
+
+// paging is where a list is in its whole, and how to move.
+type paging struct {
+	Number, Count, Total, From, To int
+	PrevURL, NextURL               string
+}
 
 // view is everything a template can see. Fragments use the slice of it
 // they need; the full page gets all of it.
@@ -64,6 +75,8 @@ type view struct {
 	Authorize *authorizeRequest
 	Error     string
 	Minted    string
+	Query     string
+	Page      paging
 }
 
 func (s *Server) providerFlags() map[string]bool {
@@ -86,7 +99,7 @@ func (s *Server) signedInView(r *http.Request, account store.Account, credential
 	if err != nil {
 		return view{}, err
 	}
-	v := view{Me: &me, Tab: tabAccount, Providers: s.providerFlags(), Tokens: tokens}
+	v := view{Me: &me, Tab: tabMe, Providers: s.providerFlags(), Tokens: tokens}
 	for _, g := range me.Groups {
 		if g == store.AdminGroup {
 			v.Admin = true
@@ -98,19 +111,8 @@ func (s *Server) signedInView(r *http.Request, account store.Account, credential
 // groupsPage is the groups tab, for identity-admin. Anybody else is sent
 // to the account tab, which is the only one they have.
 func (s *Server) groupsPage(w http.ResponseWriter, r *http.Request) {
-	account, credential, signedIn := s.viewer(r)
-	if !signedIn {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-	v, err := s.signedInView(r, account, credential)
-	if err != nil {
-		s.logger().Error("page: groups", "error", err)
-		s.render(w, http.StatusInternalServerError, "page", view{Providers: s.providerFlags(), Error: "could not read the account"})
-		return
-	}
-	if !v.Admin {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+	v, ok := s.adminPage(w, r)
+	if !ok {
 		return
 	}
 	v.Tab = tabGroups
@@ -208,6 +210,81 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 		s.logger().Error("page", "error", err)
 		s.render(w, http.StatusInternalServerError, "page", view{Providers: s.providerFlags(), Error: "could not read the account"})
 		return
+	}
+	s.render(w, http.StatusOK, "page", v)
+}
+
+// adminPage is the start of every identity-admin tab: the signed-in view,
+// or a redirect to the only tab a non-admin has.
+func (s *Server) adminPage(w http.ResponseWriter, r *http.Request) (view, bool) {
+	account, credential, signedIn := s.viewer(r)
+	if !signedIn {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return view{}, false
+	}
+	v, err := s.signedInView(r, account, credential)
+	if err != nil {
+		s.logger().Error("page: "+r.URL.Path, "error", err)
+		s.render(w, http.StatusInternalServerError, "page", view{Providers: s.providerFlags(), Error: "could not read the account"})
+		return view{}, false
+	}
+	if !v.Admin {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return view{}, false
+	}
+	return v, true
+}
+
+// accountsPage is the accounts tab: every account, newest first, a page at
+// a time, with the same search the group picker uses.
+func (s *Server) accountsPage(w http.ResponseWriter, r *http.Request) {
+	v, ok := s.adminPage(w, r)
+	if !ok {
+		return
+	}
+	v.Tab = tabAccounts
+	v.Query = strings.TrimSpace(r.URL.Query().Get("q"))
+	number := atoi(r.URL.Query().Get("page"), 1)
+	if number < 1 {
+		number = 1
+	}
+	matches, total, err := s.Store.SearchAccounts(r.Context(), v.Query, (number-1)*accountsPageSize, accountsPageSize)
+	if err != nil {
+		s.logger().Error("page: accounts", "error", err)
+		v.Error = "could not read the accounts"
+	}
+	v.Accounts = []accountBody{}
+	for _, m := range matches {
+		groups, _ := s.Store.GroupsFor(r.Context(), m.Account.ID)
+		body := accountBody{Account: m.Account.ID, Handle: m.Account.Handle, CreatedAt: m.Account.CreatedAt, Identities: []identityBody{}, Groups: groups}
+		for _, identity := range m.Identities {
+			body.Identities = append(body.Identities, identityBody{Provider: identity.Provider, ID: identity.ProviderID, Handle: identity.Handle, ProvedAt: identity.ProvedAt})
+		}
+		v.Accounts = append(v.Accounts, body)
+	}
+	count := (total + accountsPageSize - 1) / accountsPageSize
+	v.Page = paging{Number: number, Count: count, Total: total, From: (number-1)*accountsPageSize + 1, To: (number-1)*accountsPageSize + len(matches)}
+	if len(matches) == 0 {
+		v.Page.From = 0
+	}
+	link := func(n int) string {
+		q := url.Values{}
+		if v.Query != "" {
+			q.Set("q", v.Query)
+		}
+		if n > 1 {
+			q.Set("page", strconv.Itoa(n))
+		}
+		if len(q) == 0 {
+			return "/accounts"
+		}
+		return "/accounts?" + q.Encode()
+	}
+	if number > 1 {
+		v.Page.PrevURL = link(number - 1)
+	}
+	if number < count {
+		v.Page.NextURL = link(number + 1)
 	}
 	s.render(w, http.StatusOK, "page", v)
 }
@@ -575,7 +652,7 @@ func (s *Server) uiSearchAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	matches, err := s.Store.SearchAccounts(r.Context(), strings.TrimSpace(q.Get("q")), 10)
+	matches, _, err := s.Store.SearchAccounts(r.Context(), strings.TrimSpace(q.Get("q")), 0, 10)
 	if err != nil {
 		s.render(w, http.StatusInternalServerError, "error", view{Error: "could not search accounts"})
 		return

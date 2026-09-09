@@ -363,8 +363,9 @@ type GithubFinish202JSONResponseBodyStatus string
 
 // SearchAccountsParams defines parameters for SearchAccounts.
 type SearchAccountsParams struct {
-	Q     *string `form:"q,omitempty" json:"q,omitempty"`
-	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Q      *string `form:"q,omitempty" json:"q,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int    `form:"offset,omitempty" json:"offset,omitempty"`
 }
 
 // AvatarParams defines parameters for Avatar.
@@ -1557,6 +1558,18 @@ func NewSearchAccountsRequest(server string, params *SearchAccountsParams) (*htt
 		if params.Limit != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "offset", *params.Offset, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -2963,6 +2976,7 @@ type SearchAccountsResponse struct {
 	// JSON200 the response for an HTTP 200 `application/json` response
 	JSON200 *struct {
 		Accounts []Account `json:"accounts"`
+		Total    int       `json:"total"`
 	}
 	// JSON401 the response for an HTTP 401 `application/json` response
 	JSON401 *Unauthorized
@@ -2975,6 +2989,7 @@ type SearchAccountsResponse struct {
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
 func (r SearchAccountsResponse) GetJSON200() *struct {
 	Accounts []Account `json:"accounts"`
+	Total    int       `json:"total"`
 } {
 	return r.JSON200
 }
@@ -4898,6 +4913,7 @@ func ParseSearchAccountsResponse(rsp *http.Response) (*SearchAccountsResponse, e
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest struct {
 			Accounts []Account `json:"accounts"`
+			Total    int       `json:"total"`
 		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err

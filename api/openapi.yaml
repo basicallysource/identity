@@ -543,18 +543,20 @@ paths:
       parameters:
         - { name: q, in: query, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
         "200":
-          description: Matches.
+          description: One page of matches, newest first, and how many match in all.
           content:
             application/json:
               schema:
                 type: object
-                required: [accounts]
+                required: [accounts, total]
                 properties:
                   accounts:
                     type: array
                     items: { $ref: "#/components/schemas/Account" }
+                  total: { type: integer }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "500": { $ref: "#/components/responses/Failure" }

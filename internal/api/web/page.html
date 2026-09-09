@@ -55,13 +55,16 @@
 
 {{if .Admin}}
 <nav class="tabs" aria-label="Tabs">
-  <a class="tab{{if eq .Tab "account"}} active{{end}}" href="/">account</a>
+  <a class="tab{{if eq .Tab "me"}} active{{end}}" href="/">me</a>
   <a class="tab{{if eq .Tab "groups"}} active{{end}}" href="/groups">groups</a>
+  <a class="tab{{if eq .Tab "accounts"}} active{{end}}" href="/accounts">accounts</a>
 </nav>
 {{end}}
 
 {{if eq .Tab "groups"}}
 <section id="groups" class="stack">{{template "groups" .}}</section>
+{{else if eq .Tab "accounts"}}
+<section class="stack">{{template "accounts_tab" .}}</section>
 {{else}}
 {{if .Me.AvatarUploadEnabled}}
 <section id="photo">{{template "photo" .}}</section>
@@ -186,6 +189,37 @@
     <div id="search-results"></div>
   </div>
 </div>
+{{end}}
+
+{{define "accounts_tab"}}
+{{template "error" .}}
+<h2 class="h2">accounts</h2>
+<form method="get" action="/accounts" class="flex flex-col gap-3 sm:flex-row">
+  <input class="input" type="search" name="q" value="{{.Query}}" placeholder="search by handle" autocomplete="off">
+  <button class="btn">Search</button>
+  {{if .Query}}<a class="btn-quiet" href="/accounts">Clear</a>{{end}}
+</form>
+<p class="text-sm text-neutral-500">{{if .Page.Total}}{{.Page.From}}–{{.Page.To}} of {{end}}{{plural .Page.Total "account"}}{{if .Query}} matching “{{.Query}}”{{end}}, newest first.</p>
+<div class="overflow-x-auto">
+<table class="table">
+  <thead><tr><th>handle</th><th>identities</th><th>groups</th><th>created</th></tr></thead>
+  <tbody>
+  {{range .Accounts}}<tr>
+    <td><strong>{{.Handle}}</strong><br><span class="font-mono text-xs text-neutral-500">{{.Account}}</span></td>
+    <td>{{range .Identities}}<span class="mr-2 inline-flex items-center gap-1 whitespace-nowrap text-sm">{{if eq .Provider "github"}}{{template "icon-github"}}{{else}}{{template "icon-discord"}}{{end}}{{.Handle}}</span>{{end}}</td>
+    <td>{{range .Groups}}<span class="chip mr-1">{{.}}</span>{{end}}</td>
+    <td class="whitespace-nowrap text-neutral-500">{{date .CreatedAt}}</td>
+  </tr>{{else}}<tr><td colspan="4" class="text-neutral-500">No accounts match.</td></tr>{{end}}
+  </tbody>
+</table>
+</div>
+{{if gt .Page.Count 1}}
+<nav class="flex items-center justify-between text-sm" aria-label="Pages">
+  <span>{{if .Page.PrevURL}}<a class="link" href="{{.Page.PrevURL}}">‹ newer</a>{{end}}</span>
+  <span class="text-neutral-500">page {{.Page.Number}} of {{.Page.Count}}</span>
+  <span>{{if .Page.NextURL}}<a class="link" href="{{.Page.NextURL}}">older ›</a>{{end}}</span>
+</nav>
+{{end}}
 {{end}}
 
 {{define "accounts"}}

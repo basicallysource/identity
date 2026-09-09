@@ -140,19 +140,23 @@ func command(dbPath, name string, args []string) error {
 
 	switch name {
 	case "accounts":
-		matches, err := db.SearchAccounts(ctx, "", 100)
-		if err != nil {
-			return err
-		}
-		for _, m := range matches {
-			var proofs []string
-			for _, i := range m.Identities {
-				proofs = append(proofs, i.Provider+":"+i.Handle)
+		for offset := 0; ; offset += 100 {
+			matches, _, err := db.SearchAccounts(ctx, "", offset, 100)
+			if err != nil {
+				return err
 			}
-			groups, _ := db.GroupsFor(ctx, m.Account.ID)
-			fmt.Printf("%s  %-24s  %-40s  %s\n", m.Account.ID, m.Account.Handle, strings.Join(proofs, " "), strings.Join(groups, ","))
+			for _, m := range matches {
+				var proofs []string
+				for _, i := range m.Identities {
+					proofs = append(proofs, i.Provider+":"+i.Handle)
+				}
+				groups, _ := db.GroupsFor(ctx, m.Account.ID)
+				fmt.Printf("%s  %-24s  %-40s  %s\n", m.Account.ID, m.Account.Handle, strings.Join(proofs, " "), strings.Join(groups, ","))
+			}
+			if len(matches) < 100 {
+				return nil
+			}
 		}
-		return nil
 
 	case "groups":
 		groups, err := db.Groups(ctx)
