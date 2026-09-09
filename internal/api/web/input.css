@@ -9,8 +9,8 @@
   .h2 { @apply text-xs font-semibold uppercase tracking-wider text-neutral-500; }
   .link { @apply underline decoration-neutral-400 underline-offset-2 hover:decoration-current; }
   .chip { @apply rounded-full border border-neutral-300 px-2.5 py-0.5 font-mono text-sm dark:border-neutral-700; }
-  .btn { @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-md bg-neutral-900 px-3.5 py-2 text-sm font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300; }
-  .btn-provider { @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-neutral-300 bg-white px-4 py-2.5 text-sm font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:hover:bg-neutral-800; }
+  .btn { @apply inline-flex shrink-0 cursor-pointer whitespace-nowrap items-center justify-center gap-2 rounded-md bg-neutral-900 px-3.5 py-2 text-sm font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300; }
+  .btn-provider { @apply inline-flex shrink-0 cursor-pointer whitespace-nowrap items-center justify-center gap-2 rounded-md border border-neutral-300 bg-white px-4 py-2.5 text-sm font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-900 dark:hover:bg-neutral-800; }
   .btn-quiet { @apply inline-flex cursor-pointer items-center rounded-md px-2.5 py-1.5 text-sm text-neutral-600 hover:bg-neutral-200 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100; }
   .btn-danger { @apply inline-flex cursor-pointer items-center rounded-md px-2 py-1 text-xs text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950; }
   .input { @apply w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm placeholder:text-neutral-400 focus:border-neutral-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-900; }

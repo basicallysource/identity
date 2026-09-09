@@ -1,8 +1,54 @@
 # Architecture
 
-Identity proves an account; each consuming application decides what that account
-may read or change. An account has a random internal ID. Provider identities are
-attached by immutable GitHub or Discord IDs, never by handle or email.
+Identity proves an account and says which groups it is in; each consuming
+application decides what that means for what the account may read or change.
+An account has a random internal ID. Provider identities are attached by
+immutable GitHub or Discord IDs, never by handle or email.
+
+## The contract
+
+`api/openapi.yaml` is the API. Three things hold it to the code, all in
+`internal/api/contract_test.go`: the route table (`server.go`) and the spec are
+the same set in both directions; every response the test suite provokes is
+validated against the spec's schemas, because `newTestServer` wraps the handler
+in a validator; and `api/gen.go`, the generated Go client, is regenerated and
+diffed by CI. Routes come in three kinds: API routes must be in the spec, page
+routes (the HTML and its htmx fragments) and static files must not be.
+
+Request validation is deliberately not part of the test: tests send malformed
+requests to see them refused, and the refusal is what the spec has to describe.
+
+## Groups
+
+Groups are the one authorization fact this service holds: a named, flat set of
+accounts. `whoami` answers the sorted list of names an account is in, always
+present. Nothing here knows what a name means; a consumer configures "admin =
+basically-core" and asks `who.In`. That split is deliberate: membership changes
+in one place and takes effect everywhere, while the meaning of a group lives
+next to the code that enforces it.
+
+Flat, not nested. "Who is in X" and "what is A in" are each one indexed read
+with no graph to walk, and the wire shape (a flat list of effective names)
+would not change if nesting were ever added and flattened server-side.
+
+`identity-admin` is reserved: its members administer groups, it cannot be
+deleted, and its last member cannot be removed, so the service cannot lock
+itself out. Administration needs an account token; the secure middleware
+refuses application tokens anything past whoami and avatar, so a consumer's
+handoff credential cannot manage groups even for an administrator. The first
+administrator is made with the `identityd grant` command against the database,
+since no API caller can be one before somebody is. Every change is audited in
+the same transaction, with the actor's account id or `cli`.
+
+## The client package
+
+`client` is the consuming side, so that the rules live in one place: PKCE on
+the authorize request, the exchange server-side, the audience check on every
+whoami, the token sealed with AES-GCM inside an HttpOnly cookie, a whoami cache
+with a short recheck so revocation is seen within minutes, and `Require` /
+`RequireGroup` gates. It has no session table; the sealed cookie is the
+session, and rotating the key signs everyone out. It is tested end to end
+against the real server in `internal/api`.
 
 ## Sign-in and linking
 
@@ -20,9 +66,14 @@ token whose secret is stored only as a hash in SQLite. Sign-out revokes it.
 The browser script does not receive that token. GitHub CLI sign-in still returns
 a token; the browser requests cookie mode with `X-Identity-Browser: 1`.
 
-The web page exposes configured providers, provider linking, token management,
-and sign-out. Scripts load from this service only. Tokens and handoff codes are
-not placed in URLs except for the short-lived one-time callback code.
+The page is server-rendered HTML (`internal/api/web/page.html`) with htmx
+fragments under `/ui/`, built on the same operations the JSON API uses so the
+two cannot diverge. htmx runs from the embedded file with eval disabled under
+the CSP; Tailwind compiles `input.css` and the templates to a committed
+`style.css` that CI rebuilds. A consuming service's authorize request is
+finished server-side on `/authorize` the moment there is a session for it, and
+kept in a short-lived cookie across the sign-in otherwise. Tokens and handoff
+codes are not placed in URLs except for the short-lived one-time callback code.
 
 ## Application handoff
 
@@ -85,14 +136,17 @@ in again once. Other account tokens and machine credentials remain valid.
   accounts and a deliberate policy for each consumer's existing data.
 - Third-party clients, OIDC discovery, consent screens, and a general OAuth
   authorization server. Revisit a standard identity provider before adding them.
-- Application roles or data permissions. Consumers own those checks.
+- Application roles or data permissions. Groups say who; consumers say what.
+- Nested groups. Flatten server-side if it is ever needed; the wire shape stays.
 
 ## Layout
 
-- `cmd/identityd`: environment configuration and process lifecycle.
-- `internal/api`: HTTP API, browser sessions, provider flows, handoffs.
-- `internal/api/web`: HTML, JavaScript and CSS.
+- `api`: the OpenAPI contract and the generated Go client.
+- `client`: the package a consuming Go service imports.
+- `cmd/identityd`: environment configuration, process lifecycle, operator commands.
+- `internal/api`: HTTP API, browser sessions, provider flows, handoffs, groups, the page.
+- `internal/api/web`: templates, Tailwind input and output, vendored htmx.
 - `internal/avatar`: scoped private asset-service uploads and rendition delivery.
 - `internal/provider`: GitHub and Discord exchanges.
-- `internal/store`: accounts, identities, tokens and migrations.
+- `internal/store`: accounts, identities, tokens, groups and migrations.
 - `internal/token`: random opaque credentials and hashing.

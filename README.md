@@ -1,15 +1,73 @@
 # identity
 
-Who somebody is, once, for every Basically surface: sign in with GitHub or
-Discord, get one account, carry it everywhere. Other services never run their
-own sign-in; they accept this service's tokens and ask it who a token belongs
-to.
+Who somebody is, once, for every service operated together: sign in with
+GitHub or Discord, get one account, carry it everywhere. Other services never
+run their own sign-in; they accept this service's tokens and ask it who a
+token belongs to.
 
 One Go binary, one SQLite file. No passwords, ever: GitHub and Discord prove
 who people are, and the proof is used once and dropped. Tokens are opaque
 random strings stored only as hashes, revocable at any moment.
 
-## How a service uses it
+## The contract
+
+[`api/openapi.yaml`](api/openapi.yaml) describes every route. It is held to
+the implementation by tests: every route is described, every described path
+is served, and every response the test suite provokes is validated against
+the schemas. `api/gen.go` is a Go client generated from it (`go generate
+./api`, committed, CI diffs). A TypeScript client would come from the same
+file with `openapi-typescript`.
+
+## How a Go service uses it
+
+Import the client package. It is the security rules as code, so the next
+service cannot forget one:
+
+```go
+auth, err := client.New(client.Config{
+    IdentityURL: "https://identity.example",
+    BaseURL:     "https://app.example",   // this service's public origin
+    Key:         key,                     // 32 random bytes, from the environment
+})
+auth.Routes(mux)                          // /auth/signin, /auth/callback, /auth/signout, /auth/me
+mux.Handle("/admin/", auth.RequireGroup("basically-core", adminHandler))
+mux.Handle("/", auth.Require(pageHandler))
+```
+
+Behind `Require`, `client.WhoFrom(r.Context())` is the person: account id,
+handle, provider identities, and `who.In("group")`. The browser is sent to
+`/authorize` here with a PKCE challenge, comes back with a one-time code, the
+code is exchanged server-side for an application token, and that token lives
+sealed inside an HttpOnly cookie. Every `whoami` answer is checked against
+the service's own origin (`token.audience`) and re-asked every five minutes,
+so a revocation or a group change lands within that window.
+
+The service's callback URL (`BaseURL` + `/auth/callback`) must be in
+`IDENTITY_REDIRECT_ALLOW`.
+
+## Groups
+
+The one thing this service says about authorization: which accounts are in
+which named group. `whoami` answers `"groups": ["basically-core", ...]`,
+always present, sorted. **What a group means is each service's own
+decision**: this service holds membership, a service holds the rule
+("members of basically-core may open the admin page"). Onboarding and
+offboarding are one act, here.
+
+Groups are flat. If nesting ever exists, `whoami` will flatten it, so no
+consumer has to know.
+
+`identity-admin` is reserved: its members manage groups on this service's
+page, it cannot be deleted, and its last member cannot be removed. The first
+administrator is made at the terminal, since nobody can be one through the
+API before somebody is:
+
+    identityd grant identity-admin <handle-or-account-id>
+
+Also `identityd accounts`, `identityd groups`, `identityd revoke`. Every
+change, from the page or the terminal, is in the audit log.
+
+## Any service, by hand
 
 Accept a bearer token, forward it:
 
@@ -21,58 +79,28 @@ Accept a bearer token, forward it:
       "handle": "octocat",
       "created_at": "2026-08-27T00:00:00Z",
       "identities": [
-        {"provider": "github", "id": "583231", "handle": "octocat", "proved_at": "...", "avatar": {"id": "...", "width": 460, "height": 460, "source": "github"}}
+        {"provider": "github", "id": "583231", "handle": "octocat", "proved_at": "...", "avatar": {...}}
       ],
+      "groups": ["basically-core"],
       "avatar": {"id": "...", "width": 460, "height": 460, "source": "github"},
-      "token": {"id": "...", "name": "...", "audience": "https://app.example.com", "expires_at": "..."}
+      "token": {"id": "...", "name": "...", "audience": "https://app.example", "expires_at": "..."}
     }
 
-`401` means the token is bad, expired, or revoked. That is the whole
-integration: who this is, never application roles. Authorization stays each
-service's own business. Applications must check `token.audience` against their
-own origin before accepting a handoff token.
+`401` means the token is bad, expired, or revoked. A browser-facing service
+must check `token.audience` against its own origin before trusting the
+answer; the client package does this for you.
 
 ## How a person signs in
 
-- **GitHub** is the device flow: `POST /signin/github/start` returns a code to
-  type at github.com, `POST /signin/github/finish` polls until it turns into a
-  token. Works from a browser, a terminal, or an app, with no redirect and no
-  client secret.
-- **Discord** is the standard redirect: `POST /signin/discord/start` returns
-  the authorize URL, `GET /signin/discord/callback` receives the browser back.
-- Either flow, started **with** a bearer token, links the newly proved
-  identity to that account instead of signing in — that is how one account
-  comes to hold both providers. An identity already proving a different
-  account is refused, never moved.
+The page at `/` does it: sign in with GitHub (device flow, works from a
+terminal too) or Discord (redirect), link the other provider, choose a
+profile photo, mint and revoke tokens, and, for `identity-admin`, manage
+groups. It is server-rendered HTML with htmx; there is no token in the
+browser.
 
-The service also serves a small page at `/` that walks all of this for a
-person: sign in, link the other provider, update a profile photo, mint and revoke tokens.
-
-Tokens: `GET /v1/tokens`, `POST /v1/tokens {"name": "..."}`,
-`DELETE /v1/tokens/{id}`.
-
-## How a service gets a browser signed in
-
-Send the browser to `/authorize?redirect_uri=<your callback>&state=<yours>&code_challenge=<S256 challenge>`. Keep the random verifier server-side until the callback.
-The page signs the person in (or already has them), then sends the browser
-back to your callback with a one-time `code`. Exchange it server-side:
-
-    POST /v1/exchange
-    {"code": "...", "redirect_uri": "<the same callback>", "code_verifier": "..."}
-
-which answers with a fresh audience-bound token for your server to hold. Use a
-separate HttpOnly cookie for your application's session. Handoff tokens cannot
-link providers, manage credentials or obtain other application tokens. They may
-read and update their own account's profile photo. The identity
-page keeps its own persistent HttpOnly session, so returning to it does not
-require repeating provider sign-in while that session is live.
-
-Callbacks must match `IDENTITY_REDIRECT_ALLOW`; prefer exact callback URLs. An
-entry ending in `/` allows descendant paths on the same origin. Codes are
-single-use, short-lived, bound to their callback and optional PKCE challenge,
-and invalidated if their authorizing token is revoked. PKCE is recommended for
-all browser consumers. There are no third-party client registrations or consent
-screens; this service is for applications operated together.
+Either sign-in flow started **with** a bearer token links the newly proved
+identity to that account instead. An identity already proving a different
+account is refused, never moved.
 
 ## Running it
 
@@ -95,40 +123,10 @@ Configuration is environment variables:
 | `IDENTITY_ASSET_NAMESPACE` | `profile-avatars` | private photo namespace |
 | `IDENTITY_STORAGE_ORIGIN` | — | allowed origin of private signed object URLs |
 
-## Profile photos
-
-`POST /v1/avatar` accepts the raw bytes of a JPEG, PNG or WebP image, with its
-matching Content-Type. The limit is 5 MiB, 16 megapixels, 8192 pixels per side,
-and six upload attempts per account per hour. Full decoding rejects malformed
-images before any storage request. Only one image upload runs at a time.
-
-The original bytes are saved privately in the asset service, which builds its
-normal rendition ladder. Configure that worker's image widths to include
-thumbnail sizes such as 64, 128 and 256 for small account pictures. GitHub and
-Discord pictures are copied into the same private store the first time each
-identity signs in or is linked. Whoami describes each available provider picture
-and adds the selected `avatar: {id, width, height, source}`. With no explicit
-selection, Identity uses the first linked account with a picture and skips nulls.
-`PUT /v1/avatar {"source":"discord"}` selects a provider picture; uploading a
-photo selects `upload`. The response also includes `uploaded_avatar` when present
-and `avatar_upload_enabled`.
-No private storage URL or asset-service credential is returned to the browser.
-
-`GET /v1/avatar?size=128` authenticates the caller and streams the smallest
-available image large enough for that square display size. It accounts for
-both dimensions when the photo is not square, and falls back to the largest
-available image if needed. Applications should use the desired rendered size
-times the display's pixel ratio, typically through `srcset`. A `source` query
-selects one of the caller's described pictures for a picker preview. Responses
-are private and not cached. `DELETE /v1/avatar` removes only the uploaded picture;
-provider pictures remain available and immutable original assets remain private.
-
-Every avatar operation is for the authenticated account only. There is no
-account-ID parameter or public avatar route. Browser applications proxy this
-endpoint through their own authenticated backend and keep the identity token
-server-side. Cookies require same-origin writes, including photo uploads.
-
 A provider with no credentials set is simply not offered. The Discord app must
 have `BASE_URL/signin/discord/callback` registered as a redirect, exactly.
+
+Developing the page: `cd internal/api/web && npm ci && npm run build`
+rebuilds `style.css` from the templates; the output is committed.
 
 See `agent-docs/architecture.md` for the decisions and their reasons.
