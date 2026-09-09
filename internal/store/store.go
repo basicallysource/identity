@@ -1,12 +1,13 @@
 // Package store is the whole database: who exists, which provider identities
 // prove them, and which tokens speak for them.
 //
-// The shape is three tables. An account is the person; it owns an id, a display
-// handle, and an optional uploaded profile photo. An identity is one proof at a
-// provider (github, discord), keyed by the provider's own immutable id, never
-// by a login that can be renamed and re-registered, plus that provider's private
-// profile-photo copy. A token is an opaque
-// credential this service minted; its secret is stored only as a hash.
+// The shape is three tables plus groups. An account is the person; it owns an
+// id, a display handle, and an optional uploaded profile photo. An identity is
+// one proof at a provider (github, discord), keyed by the provider's own
+// immutable id, never by a login that can be renamed and re-registered, plus
+// that provider's private profile-photo copy. A token is an opaque credential
+// this service minted; its secret is stored only as a hash. Groups (groups.go)
+// are named sets of accounts, the one authorization fact this service holds.
 package store
 
 import (
@@ -102,7 +103,7 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("store: %s: %w", pragma, err)
 		}
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(schema + groupSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: create schema: %w", err)
 	}

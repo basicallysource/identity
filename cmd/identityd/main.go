@@ -17,11 +17,24 @@
 //
 // A provider with no credentials set is simply not offered. The Discord app
 // must have BASE_URL/signin/discord/callback registered as a redirect.
+//
+// With no arguments it serves. With arguments it is the operator's command
+// against the same database, for the things that must work with nobody
+// signed in -- above all the first identity-admin, without whom the groups
+// page has no administrator to open it:
+//
+//	identityd accounts                    list every account and its identities
+//	identityd groups                      list every group and its members
+//	identityd grant <group> <account>     add to a group, creating the group if needed
+//	identityd revoke <group> <account>    remove from a group
+//
+// <account> is an account id or a handle that names exactly one account.
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -39,10 +52,21 @@ import (
 var version = "dev"
 
 func main() {
+	dbPath := env("IDENTITY_DB", "identity.db")
+	if len(os.Args) > 1 {
+		if err := command(dbPath, os.Args[1], os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "identityd:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	serve(dbPath)
+}
+
+func serve(dbPath string) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	addr := env("IDENTITY_ADDR", ":8870")
-	dbPath := env("IDENTITY_DB", "identity.db")
 	baseURL := strings.TrimSuffix(env("IDENTITY_BASE_URL", "http://localhost:8870"), "/")
 
 	db, err := store.Open(dbPath)
@@ -98,6 +122,84 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
+}
+
+// cliActor is what the audit log records for a change made at the terminal
+// rather than by a signed-in account.
+const cliActor = "cli"
+
+// command is the operator surface. It opens the database directly, so it
+// works on the box with the service stopped or running, and needs no token.
+func command(dbPath, name string, args []string) error {
+	db, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	switch name {
+	case "accounts":
+		matches, err := db.SearchAccounts(ctx, "", 100)
+		if err != nil {
+			return err
+		}
+		for _, m := range matches {
+			var proofs []string
+			for _, i := range m.Identities {
+				proofs = append(proofs, i.Provider+":"+i.Handle)
+			}
+			groups, _ := db.GroupsFor(ctx, m.Account.ID)
+			fmt.Printf("%s  %-24s  %-40s  %s\n", m.Account.ID, m.Account.Handle, strings.Join(proofs, " "), strings.Join(groups, ","))
+		}
+		return nil
+
+	case "groups":
+		groups, err := db.Groups(ctx)
+		if err != nil {
+			return err
+		}
+		for _, g := range groups {
+			_, members, err := db.Group(ctx, g.Name)
+			if err != nil {
+				return err
+			}
+			var handles []string
+			for _, m := range members {
+				handles = append(handles, m.Handle)
+			}
+			fmt.Printf("%-24s  %d  %s\n", g.Name, len(members), strings.Join(handles, ", "))
+		}
+		return nil
+
+	case "grant", "revoke":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: identityd %s <group> <account-id-or-handle>", name)
+		}
+		group, who := args[0], args[1]
+		account, err := db.ResolveAccount(ctx, who)
+		if err != nil {
+			return err
+		}
+		if name == "revoke" {
+			if err := db.RemoveMember(ctx, group, account.ID, cliActor); err != nil {
+				return err
+			}
+			fmt.Printf("removed %s (%s) from %s\n", account.Handle, account.ID, group)
+			return nil
+		}
+		if err := db.CreateGroup(ctx, group, "", cliActor); err != nil && !errors.Is(err, store.ErrExists) {
+			return err
+		}
+		if err := db.AddMember(ctx, group, account.ID, cliActor); err != nil {
+			return err
+		}
+		fmt.Printf("added %s (%s) to %s\n", account.Handle, account.ID, group)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown command %q; commands are accounts, groups, grant, revoke", name)
+	}
 }
 
 func env(name, fallback string) string {

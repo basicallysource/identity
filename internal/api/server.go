@@ -71,42 +71,84 @@ type pendingFlow struct {
 	expires       time.Time
 }
 
+// routeKind says what a route is for, which decides what the contract owes
+// it. An api route must be described in api/openapi.yaml, and a test holds
+// the two lists equal; a page route is the HTML the browser sees and a
+// static route is a file, and neither belongs in a service contract.
+type routeKind int
+
+const (
+	routeAPI routeKind = iota
+	routePage
+	routeStatic
+)
+
+type route struct {
+	Method  string
+	Pattern string
+	Kind    routeKind
+	Handler http.HandlerFunc
+}
+
+// routes is the whole HTTP surface in one table, so a test can read it. A
+// route registered anywhere else would be invisible to the contract check,
+// which is the reason there is nowhere else to register one.
+func (s *Server) routes() []route {
+	return []route{
+		{"GET", "/{$}", routePage, s.page},
+		// The page itself handles an authorize request; the route exists so a
+		// consuming service has a name to send the browser to.
+		{"GET", "/authorize", routePage, s.page},
+		{"GET", "/style.css", routeStatic, s.stylesheet},
+		{"GET", "/app.js", routeStatic, func(w http.ResponseWriter, r *http.Request) { serveEmbedded(w, "web/app.js", "text/javascript") }},
+		{"POST", "/session/logout", routeAPI, s.logout},
+		{"GET", "/providers", routeAPI, s.providers},
+		{"GET", "/healthz", routeAPI, s.healthz},
+
+		{"POST", "/signin/github/start", routeAPI, s.githubStart},
+		{"POST", "/signin/github/finish", routeAPI, s.githubFinish},
+		{"POST", "/signin/discord/start", routeAPI, s.discordStart},
+		{"GET", "/signin/discord/callback", routeAPI, s.discordCallback},
+
+		{"GET", "/v1/whoami", routeAPI, s.whoami},
+		{"GET", "/v1/avatar", routeAPI, s.avatar},
+		{"POST", "/v1/avatar", routeAPI, s.uploadAvatar},
+		{"PUT", "/v1/avatar", routeAPI, s.selectAvatar},
+		{"DELETE", "/v1/avatar", routeAPI, s.removeAvatar},
+		{"POST", "/v1/handoff", routeAPI, s.handoff},
+		{"POST", "/v1/exchange", routeAPI, s.exchange},
+		{"GET", "/v1/tokens", routeAPI, s.listTokens},
+		{"POST", "/v1/tokens", routeAPI, s.mintToken},
+		{"DELETE", "/v1/tokens/{id}", routeAPI, s.revokeToken},
+
+		{"GET", "/v1/groups", routeAPI, s.listGroups},
+		{"POST", "/v1/groups", routeAPI, s.createGroup},
+		{"GET", "/v1/groups/audit", routeAPI, s.groupAudit},
+		{"GET", "/v1/groups/{name}", routeAPI, s.getGroup},
+		{"DELETE", "/v1/groups/{name}", routeAPI, s.deleteGroup},
+		{"PUT", "/v1/groups/{name}/members/{account}", routeAPI, s.addMember},
+		{"DELETE", "/v1/groups/{name}/members/{account}", routeAPI, s.removeMember},
+		{"GET", "/v1/accounts", routeAPI, s.searchAccounts},
+	}
+}
+
 // Handler builds the routes.
 func (s *Server) Handler() http.Handler {
 	s.avatar_throttle.limit, s.avatar_throttle.per = 6, time.Hour
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /{$}", s.page)
-	// The page itself handles an authorize request; the route exists so a
-	// consuming service has a name to send the browser to.
-	mux.HandleFunc("GET /authorize", s.page)
-	mux.HandleFunc("GET /style.css", s.stylesheet)
-	mux.HandleFunc("GET /app.js", func(w http.ResponseWriter, r *http.Request) { serveEmbedded(w, "web/app.js", "text/javascript") })
-	mux.HandleFunc("POST /session/logout", s.logout)
-	mux.HandleFunc("GET /providers", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]bool{"github": s.GitHub.Configured(), "discord": s.Discord.Configured()})
-	})
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
-	})
-
-	mux.HandleFunc("POST /signin/github/start", s.githubStart)
-	mux.HandleFunc("POST /signin/github/finish", s.githubFinish)
-	mux.HandleFunc("POST /signin/discord/start", s.discordStart)
-	mux.HandleFunc("GET /signin/discord/callback", s.discordCallback)
-
-	mux.HandleFunc("GET /v1/whoami", s.whoami)
-	mux.HandleFunc("GET /v1/avatar", s.avatar)
-	mux.HandleFunc("POST /v1/avatar", s.uploadAvatar)
-	mux.HandleFunc("PUT /v1/avatar", s.selectAvatar)
-	mux.HandleFunc("DELETE /v1/avatar", s.removeAvatar)
-	mux.HandleFunc("POST /v1/handoff", s.handoff)
-	mux.HandleFunc("POST /v1/exchange", s.exchange)
-	mux.HandleFunc("GET /v1/tokens", s.listTokens)
-	mux.HandleFunc("POST /v1/tokens", s.mintToken)
-	mux.HandleFunc("DELETE /v1/tokens/{id}", s.revokeToken)
-
+	for _, r := range s.routes() {
+		mux.HandleFunc(r.Method+" "+r.Pattern, r.Handler)
+	}
 	return s.secure(mux)
+}
+
+func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"github": s.GitHub.Configured(), "discord": s.Discord.Configured()})
+}
+
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte("ok"))
 }
 
 func (s *Server) now() time.Time {

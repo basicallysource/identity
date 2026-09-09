@@ -23,14 +23,18 @@ type identityBody struct {
 }
 
 type whoamiResponse struct {
-	Account             string         `json:"account"`
-	Handle              string         `json:"handle"`
-	CreatedAt           time.Time      `json:"created_at"`
-	Identities          []identityBody `json:"identities"`
-	Token               tokenBody      `json:"token"`
-	Avatar              *avatarBody    `json:"avatar,omitempty"`
-	UploadedAvatar      *avatarBody    `json:"uploaded_avatar,omitempty"`
-	AvatarUploadEnabled bool           `json:"avatar_upload_enabled"`
+	Account    string         `json:"account"`
+	Handle     string         `json:"handle"`
+	CreatedAt  time.Time      `json:"created_at"`
+	Identities []identityBody `json:"identities"`
+	// Groups is every group the account is in, sorted, and always present:
+	// an account in none answers [], never null. It is the only authorization
+	// claim this service makes; what a name means is the consumer's business.
+	Groups              []string    `json:"groups"`
+	Token               tokenBody   `json:"token"`
+	Avatar              *avatarBody `json:"avatar,omitempty"`
+	UploadedAvatar      *avatarBody `json:"uploaded_avatar,omitempty"`
+	AvatarUploadEnabled bool        `json:"avatar_upload_enabled"`
 }
 
 type tokenBody struct {
@@ -56,11 +60,20 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	groups, err := s.Store.GroupsFor(r.Context(), account.ID)
+	if err != nil {
+		s.logger().Error("whoami: groups", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not read the account")
+		return
+	}
+
 	selected_avatar, uploaded_avatar, provider_avatars := accountAvatars(account, identities)
 	response := whoamiResponse{
 		Account:             account.ID,
 		Handle:              account.Handle,
 		CreatedAt:           account.CreatedAt,
+		Identities:          []identityBody{},
+		Groups:              groups,
 		Token:               describeToken(credential),
 		Avatar:              selected_avatar,
 		UploadedAvatar:      uploaded_avatar,
