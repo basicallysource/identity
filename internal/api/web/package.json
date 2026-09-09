@@ -1,0 +1,12 @@
+{
+  "name": "identity-web",
+  "private": true,
+  "description": "Builds style.css from input.css with Tailwind. The output is committed; CI rebuilds and diffs.",
+  "scripts": {
+    "build": "tailwindcss -i input.css -o style.css --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.3",
+    "tailwindcss": "4.3.3"
+  }
+}

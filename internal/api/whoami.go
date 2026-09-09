@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -52,19 +53,25 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "a live bearer token is required")
 		return
 	}
-
-	identities, err := s.Store.IdentitiesFor(r.Context(), account.ID)
+	response, err := s.describe(r.Context(), account, credential)
 	if err != nil {
-		s.logger().Error("whoami: identities", "error", err)
+		s.logger().Error("whoami", "error", err)
 		writeError(w, http.StatusInternalServerError, "could not read the account")
 		return
 	}
+	writeJSON(w, http.StatusOK, response)
+}
 
-	groups, err := s.Store.GroupsFor(r.Context(), account.ID)
+// describe is the whoami answer for an account, as seen through one
+// credential. The page renders the same thing the API returns.
+func (s *Server) describe(ctx context.Context, account store.Account, credential store.Token) (whoamiResponse, error) {
+	identities, err := s.Store.IdentitiesFor(ctx, account.ID)
 	if err != nil {
-		s.logger().Error("whoami: groups", "error", err)
-		writeError(w, http.StatusInternalServerError, "could not read the account")
-		return
+		return whoamiResponse{}, err
+	}
+	groups, err := s.Store.GroupsFor(ctx, account.ID)
+	if err != nil {
+		return whoamiResponse{}, err
 	}
 
 	selected_avatar, uploaded_avatar, provider_avatars := accountAvatars(account, identities)
@@ -89,7 +96,32 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 			Avatar:   provider_avatars[source],
 		})
 	}
-	writeJSON(w, http.StatusOK, response)
+	return response, nil
+}
+
+// tokenRow is a token as listed: described, plus whether it is the one
+// asking.
+type tokenRow struct {
+	tokenBody
+	Current bool `json:"current,omitempty"`
+}
+
+// tokenRows lists an account's live and recently revoked tokens. Dead
+// tokens stay listed briefly for audit; an expired token from months ago
+// is noise.
+func (s *Server) tokenRows(ctx context.Context, account store.Account, credential store.Token) ([]tokenRow, error) {
+	tokens, err := s.Store.TokensFor(ctx, account.ID)
+	if err != nil {
+		return nil, err
+	}
+	rows := []tokenRow{}
+	for _, t := range tokens {
+		if !t.Live(s.now()) && t.RevokedAt.IsZero() {
+			continue
+		}
+		rows = append(rows, tokenRow{tokenBody: describeToken(t), Current: t.ID == credential.ID})
+	}
+	return rows, nil
 }
 
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
@@ -98,27 +130,11 @@ func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "a live bearer token is required")
 		return
 	}
-
-	tokens, err := s.Store.TokensFor(r.Context(), account.ID)
+	rows, err := s.tokenRows(r.Context(), account, credential)
 	if err != nil {
 		s.logger().Error("tokens: list", "error", err)
 		writeError(w, http.StatusInternalServerError, "could not read the tokens")
 		return
-	}
-
-	type row struct {
-		tokenBody
-		Current bool `json:"current,omitempty"`
-	}
-	rows := []row{}
-	for _, t := range tokens {
-		// Dead tokens stay listed briefly useful for audit, but only live
-		// and recently revoked ones; an expired token from months ago is
-		// noise.
-		if !t.Live(s.now()) && t.RevokedAt.IsZero() {
-			continue
-		}
-		rows = append(rows, row{tokenBody: describeToken(t), Current: t.ID == credential.ID})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tokens": rows})
 }

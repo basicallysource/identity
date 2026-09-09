@@ -30,110 +30,104 @@ type tokenResponse struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// githubStart asks GitHub for a device code for the caller to approve.
-func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
+// failure is a refusal a flow can answer with, whichever surface asked: the
+// JSON API writes it as an error body, the page renders it as a message.
+type failure struct {
+	status     int
+	message    string
+	retryAfter string
+}
+
+func (f *failure) write(w http.ResponseWriter) {
+	if f.retryAfter != "" {
+		w.Header().Set("Retry-After", f.retryAfter)
+	}
+	writeError(w, f.status, f.message)
+}
+
+// linkTarget reads whether a flow is a sign-in or, because the caller is
+// already signed in, a link to that account.
+func (s *Server) linkTarget(r *http.Request) (string, *failure) {
+	account, _, err := s.authenticate(r)
+	switch {
+	case err == nil:
+		return account.ID, nil
+	case errors.Is(err, errNoCredentials):
+		return "", nil
+	default:
+		return "", &failure{http.StatusUnauthorized, "that token no longer works; sign in again", ""}
+	}
+}
+
+// beginGitHub asks GitHub for a device code for the caller to approve. With
+// a signed-in caller the eventual proof links rather than signs in.
+func (s *Server) beginGitHub(r *http.Request) (provider.Device, *failure) {
 	if !s.GitHub.Configured() {
-		writeError(w, http.StatusNotImplemented, "GitHub sign-in is not configured on this service")
-		return
+		return provider.Device{}, &failure{http.StatusNotImplemented, "GitHub sign-in is not configured on this service", ""}
 	}
 	if !s.throttle.allow(s.clientAddr(r), s.now()) {
-		w.Header().Set("Retry-After", "60")
-		writeError(w, http.StatusTooManyRequests, "too many sign-in attempts; wait a minute")
-		return
+		return provider.Device{}, &failure{http.StatusTooManyRequests, "too many sign-in attempts; wait a minute", "60"}
 	}
-
-	// A bearer token turns this flow into a link to that account.
-	linkTo := ""
-	if account, _, err := s.authenticate(r); err == nil {
-		linkTo = account.ID
-	} else if !errors.Is(err, errNoCredentials) {
-		writeError(w, http.StatusUnauthorized, "that token no longer works; sign in again")
-		return
+	linkTo, fail := s.linkTarget(r)
+	if fail != nil {
+		return provider.Device{}, fail
 	}
-
 	device, err := s.GitHub.Start(r.Context())
 	if err != nil {
 		s.logger().Error("sign-in: github start", "error", err)
-		writeError(w, http.StatusBadGateway, "could not reach GitHub")
-		return
+		return provider.Device{}, &failure{http.StatusBadGateway, "could not reach GitHub", ""}
 	}
 	if linkTo != "" {
 		s.remember("device:"+device.DeviceCode, linkTo)
 	}
-
-	writeJSON(w, http.StatusOK, device)
+	return device, nil
 }
 
-// githubFinish turns an approved device code into a token, or a link.
-func (s *Server) githubFinish(w http.ResponseWriter, r *http.Request) {
+// redeemGitHub polls GitHub for an approved device code. pending is true
+// while the person has not finished at github.com; slow is GitHub asking
+// for a longer interval. On success the proved user is returned along with
+// the account it links to, or "" for a sign-in.
+func (s *Server) redeemGitHub(r *http.Request, deviceCode string) (user provider.User, linkTo string, pending, slow bool, fail *failure) {
 	if !s.GitHub.Configured() {
-		writeError(w, http.StatusNotImplemented, "GitHub sign-in is not configured on this service")
-		return
+		return user, "", false, false, &failure{http.StatusNotImplemented, "GitHub sign-in is not configured on this service", ""}
 	}
-
-	var body struct {
-		DeviceCode string `json:"device_code"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, signInBodyLimit)).Decode(&body); err != nil || body.DeviceCode == "" {
-		writeError(w, http.StatusBadRequest, `send {"device_code": "..."}`)
-		return
-	}
-
-	user, err := s.GitHub.Redeem(r.Context(), body.DeviceCode)
+	user, err := s.GitHub.Redeem(r.Context(), deviceCode)
 	switch {
 	case errors.Is(err, provider.ErrPending):
-		// Not an error: the person has not finished at github.com yet.
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
-		return
+		return user, "", true, false, nil
 	case errors.Is(err, provider.ErrSlowDown):
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "slow_down"})
-		return
+		return user, "", true, true, nil
 	case errors.Is(err, provider.ErrExpired):
-		writeError(w, http.StatusBadRequest, "that code expired; start again")
-		return
+		return user, "", false, false, &failure{http.StatusBadRequest, "that code expired; start again", ""}
 	case errors.Is(err, provider.ErrDenied):
-		writeError(w, http.StatusForbidden, "the request was declined at GitHub")
-		return
+		return user, "", false, false, &failure{http.StatusForbidden, "the request was declined at GitHub", ""}
 	case err != nil:
 		s.logger().Error("sign-in: github redeem", "error", err)
-		writeError(w, http.StatusBadGateway, "could not reach GitHub")
-		return
+		return user, "", false, false, &failure{http.StatusBadGateway, "could not reach GitHub", ""}
 	}
-
-	if flow, ok := s.recall("device:" + body.DeviceCode); ok && flow.accountID != "" {
-		s.finishLink(w, r, flow.accountID, provider.NameGitHub, user)
-		return
+	if flow, ok := s.recall("device:" + deviceCode); ok && flow.accountID != "" {
+		linkTo = flow.accountID
 	}
-
-	s.finishSignIn(w, r, provider.NameGitHub, user)
+	return user, linkTo, false, false, nil
 }
 
-// discordStart mints the state for a redirect to Discord and answers with
-// where to send the browser.
-func (s *Server) discordStart(w http.ResponseWriter, r *http.Request) {
+// beginDiscord mints the state for a redirect to Discord, sets the cookie
+// the callback must match, and answers with where to send the browser.
+func (s *Server) beginDiscord(w http.ResponseWriter, r *http.Request) (string, *failure) {
 	if !s.Discord.Configured() {
-		writeError(w, http.StatusNotImplemented, "Discord sign-in is not configured on this service")
-		return
+		return "", &failure{http.StatusNotImplemented, "Discord sign-in is not configured on this service", ""}
 	}
 	if !s.throttle.allow(s.clientAddr(r), s.now()) {
-		w.Header().Set("Retry-After", "60")
-		writeError(w, http.StatusTooManyRequests, "too many sign-in attempts; wait a minute")
-		return
+		return "", &failure{http.StatusTooManyRequests, "too many sign-in attempts; wait a minute", "60"}
 	}
-
-	linkTo := ""
-	if account, _, err := s.authenticate(r); err == nil {
-		linkTo = account.ID
-	} else if !errors.Is(err, errNoCredentials) {
-		writeError(w, http.StatusUnauthorized, "that token no longer works; sign in again")
-		return
+	linkTo, fail := s.linkTarget(r)
+	if fail != nil {
+		return "", fail
 	}
-
 	state, err := newState()
 	if err != nil {
 		s.logger().Error("sign-in: discord state", "error", err)
-		writeError(w, http.StatusInternalServerError, "could not start sign-in")
-		return
+		return "", &failure{http.StatusInternalServerError, "could not start sign-in", ""}
 	}
 	s.remember("state:"+state, linkTo)
 
@@ -148,10 +142,52 @@ func (s *Server) discordStart(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Secure:   strings.HasPrefix(s.BaseURL, "https://"),
 	})
+	return s.Discord.Authorize(state, s.discordRedirect()), nil
+}
 
-	writeJSON(w, http.StatusOK, map[string]string{
-		"url": s.Discord.Authorize(state, s.discordRedirect()),
-	})
+// githubStart is the JSON face of beginGitHub.
+func (s *Server) githubStart(w http.ResponseWriter, r *http.Request) {
+	device, fail := s.beginGitHub(r)
+	if fail != nil {
+		fail.write(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, device)
+}
+
+// githubFinish turns an approved device code into a token, or a link.
+func (s *Server) githubFinish(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DeviceCode string `json:"device_code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, signInBodyLimit)).Decode(&body); err != nil || body.DeviceCode == "" {
+		writeError(w, http.StatusBadRequest, `send {"device_code": "..."}`)
+		return
+	}
+	user, linkTo, pending, slow, fail := s.redeemGitHub(r, body.DeviceCode)
+	switch {
+	case fail != nil:
+		fail.write(w)
+	case slow:
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "slow_down"})
+	case pending:
+		// Not an error: the person has not finished at github.com yet.
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
+	case linkTo != "":
+		s.finishLink(w, r, linkTo, provider.NameGitHub, user)
+	default:
+		s.finishSignIn(w, r, provider.NameGitHub, user)
+	}
+}
+
+// discordStart is the JSON face of beginDiscord.
+func (s *Server) discordStart(w http.ResponseWriter, r *http.Request) {
+	url, fail := s.beginDiscord(w, r)
+	if fail != nil {
+		fail.write(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
 }
 
 // discordCallback is where Discord sends the browser back.
@@ -182,28 +218,19 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if flow.accountID != "" {
-		err := s.Store.Link(r.Context(), flow.accountID, provider.NameDiscord, user.ID, user.Handle)
-		switch {
-		case errors.Is(err, store.ErrLinkedElsewhere):
-			s.callbackPage(w, callbackView{Error: "that Discord account already belongs to a different account here"})
-		case err != nil:
-			s.logger().Error("sign-in: discord link", "error", err)
-			s.callbackPage(w, callbackView{Error: "could not record the link"})
-		default:
-			s.saveProviderAvatar(r.Context(), provider.NameDiscord, user)
-			s.logger().Info("linked an identity", "account", flow.accountID, "provider", provider.NameDiscord, "handle", user.Handle)
-			s.callbackPage(w, callbackView{Linked: true})
+		if fail := s.completeLink(r, flow.accountID, provider.NameDiscord, user); fail != nil {
+			s.callbackPage(w, callbackView{Error: fail.message})
+			return
 		}
+		s.callbackPage(w, callbackView{Linked: true})
 		return
 	}
 
-	account, err := s.Store.SignIn(r.Context(), provider.NameDiscord, user.ID, user.Handle)
-	if err != nil {
-		s.logger().Error("sign-in: discord record", "error", err)
-		s.callbackPage(w, callbackView{Error: "could not record the sign-in"})
+	account, fail := s.completeSignIn(r, provider.NameDiscord, user)
+	if fail != nil {
+		s.callbackPage(w, callbackView{Error: fail.message})
 		return
 	}
-	s.saveProviderAvatar(r.Context(), provider.NameDiscord, user)
 	minted, err := s.issue(r, account, "", "")
 	if err != nil {
 		s.callbackPage(w, callbackView{Error: "could not issue a token: " + err.Error()})
@@ -217,15 +244,40 @@ func (s *Server) discordRedirect() string {
 	return strings.TrimSuffix(s.BaseURL, "/") + "/signin/discord/callback"
 }
 
-// finishSignIn records the proof and answers with a fresh token.
-func (s *Server) finishSignIn(w http.ResponseWriter, r *http.Request, providerName string, user provider.User) {
+// completeSignIn records a proof as a sign-in and returns the account it
+// proves, creating one on first sight.
+func (s *Server) completeSignIn(r *http.Request, providerName string, user provider.User) (store.Account, *failure) {
 	account, err := s.Store.SignIn(r.Context(), providerName, user.ID, user.Handle)
 	if err != nil {
 		s.logger().Error("sign-in: record", "provider", providerName, "error", err)
-		writeError(w, http.StatusInternalServerError, "could not record the sign-in")
-		return
+		return store.Account{}, &failure{http.StatusInternalServerError, "could not record the sign-in", ""}
 	}
 	s.saveProviderAvatar(r.Context(), providerName, user)
+	return account, nil
+}
+
+// completeLink records a proof as a link to an existing account.
+func (s *Server) completeLink(r *http.Request, accountID, providerName string, user provider.User) *failure {
+	err := s.Store.Link(r.Context(), accountID, providerName, user.ID, user.Handle)
+	switch {
+	case errors.Is(err, store.ErrLinkedElsewhere):
+		return &failure{http.StatusConflict, "that " + providerName + " account already belongs to a different account here", ""}
+	case err != nil:
+		s.logger().Error("sign-in: link", "provider", providerName, "error", err)
+		return &failure{http.StatusInternalServerError, "could not record the link", ""}
+	}
+	s.saveProviderAvatar(r.Context(), providerName, user)
+	s.logger().Info("linked an identity", "account", accountID, "provider", providerName, "handle", user.Handle)
+	return nil
+}
+
+// finishSignIn records the proof and answers with a fresh token.
+func (s *Server) finishSignIn(w http.ResponseWriter, r *http.Request, providerName string, user provider.User) {
+	account, fail := s.completeSignIn(r, providerName, user)
+	if fail != nil {
+		fail.write(w)
+		return
+	}
 	minted, err := s.issue(r, account, "", "")
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
@@ -240,22 +292,15 @@ func (s *Server) finishSignIn(w http.ResponseWriter, r *http.Request, providerNa
 
 // finishLink attaches the proof to an existing account instead.
 func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, accountID, providerName string, user provider.User) {
-	err := s.Store.Link(r.Context(), accountID, providerName, user.ID, user.Handle)
-	switch {
-	case errors.Is(err, store.ErrLinkedElsewhere):
-		writeError(w, http.StatusConflict, "that "+providerName+" account already belongs to a different account here")
-	case err != nil:
-		s.logger().Error("sign-in: link", "provider", providerName, "error", err)
-		writeError(w, http.StatusInternalServerError, "could not record the link")
-	default:
-		s.saveProviderAvatar(r.Context(), providerName, user)
-		s.logger().Info("linked an identity", "account", accountID, "provider", providerName, "handle", user.Handle)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"linked":   true,
-			"provider": providerName,
-			"handle":   user.Handle,
-		})
+	if fail := s.completeLink(r, accountID, providerName, user); fail != nil {
+		fail.write(w)
+		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"linked":   true,
+		"provider": providerName,
+		"handle":   user.Handle,
+	})
 }
 
 // issue mints a token for an account, within policy. An empty name gets the

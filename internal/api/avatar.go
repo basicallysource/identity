@@ -132,9 +132,8 @@ func (s *Server) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.avatar_mu.Unlock()
-	if !s.avatar_throttle.allow(account.ID, s.now()) {
-		w.Header().Set("Retry-After", "3600")
-		writeError(w, 429, "profile photos can be changed six times per hour")
+	if fail := s.avatarAttempt(account); fail != nil {
+		fail.write(w)
 		return
 	}
 	http.NewResponseController(w).SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -143,25 +142,53 @@ func (s *Server) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 413, "choose an image no larger than 5 MiB")
 		return
 	}
+	stored, fail := s.storeUploadedAvatar(r.Context(), account, raw, content_type)
+	if fail != nil {
+		fail.write(w)
+		return
+	}
+	writeJSON(w, 201, stored)
+}
+
+// avatarAttempt charges one upload to the account's hourly allowance. It is
+// charged before the bytes are read, including for the ones about to be
+// refused, so a loop of bad uploads costs its author the hour like a loop
+// of good ones.
+func (s *Server) avatarAttempt(account store.Account) *failure {
+	if !s.avatar_throttle.allow(account.ID, s.now()) {
+		return &failure{429, "profile photos can be changed six times per hour", "3600"}
+	}
+	return nil
+}
+
+// storeUploadedAvatar is the half of an upload that is the same whichever
+// surface received the bytes: full decoding, the private upload, and the
+// record. The caller holds avatar_mu and has charged avatarAttempt.
+func (s *Server) storeUploadedAvatar(ctx context.Context, account store.Account, raw []byte, content_type string) (*avatarBody, *failure) {
+	if s.Avatars == nil {
+		return nil, &failure{503, "profile photos are not configured", ""}
+	}
+	if content_type != "image/jpeg" && content_type != "image/png" && content_type != "image/webp" {
+		return nil, &failure{415, "choose a JPEG, PNG or WebP image", ""}
+	}
+	if len(raw) > MAX_AVATAR_BYTES {
+		return nil, &failure{413, "choose an image no larger than 5 MiB", ""}
+	}
 	width, height, extension, err := avatarImage(raw, content_type)
 	if errors.Is(err, errAvatarDimensions) {
-		writeError(w, 413, "image must be at most 16 megapixels and 8192 pixels per side")
-		return
+		return nil, &failure{413, "image must be at most 16 megapixels and 8192 pixels per side", ""}
 	}
 	if err != nil {
-		writeError(w, 415, "this file is not a supported image")
-		return
+		return nil, &failure{415, "this file is not a supported image", ""}
 	}
-	key, err := s.Avatars.Upload(r.Context(), raw, content_type, extension)
+	key, err := s.Avatars.Upload(ctx, raw, content_type, extension)
 	if err != nil {
-		writeError(w, 502, "could not store the profile photo")
-		return
+		return nil, &failure{502, "could not store the profile photo", ""}
 	}
-	if err := s.Store.SetAvatar(r.Context(), account.ID, key, width, height); err != nil {
-		writeError(w, 500, "could not save the profile photo")
-		return
+	if err := s.Store.SetAvatar(ctx, account.ID, key, width, height); err != nil {
+		return nil, &failure{500, "could not save the profile photo", ""}
 	}
-	writeJSON(w, 201, describeAvatar("upload", key, width, height))
+	return describeAvatar("upload", key, width, height), nil
 }
 
 func (s *Server) avatar(w http.ResponseWriter, r *http.Request) {

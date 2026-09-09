@@ -100,7 +100,26 @@ func (s *Server) routes() []route {
 		// consuming service has a name to send the browser to.
 		{"GET", "/authorize", routePage, s.page},
 		{"GET", "/style.css", routeStatic, s.stylesheet},
-		{"GET", "/app.js", routeStatic, func(w http.ResponseWriter, r *http.Request) { serveEmbedded(w, "web/app.js", "text/javascript") }},
+		{"GET", "/htmx.min.js", routeStatic, s.script},
+
+		// The page's own fragments (ui.go). HTML in, HTML out, cookie session.
+		{"POST", "/ui/signin/github", routePage, s.uiGitHubStart},
+		{"POST", "/ui/signin/github/poll", routePage, s.uiGitHubPoll},
+		{"POST", "/ui/signin/discord", routePage, s.uiDiscordStart},
+		{"POST", "/ui/signout", routePage, s.uiSignOut},
+		{"POST", "/ui/tokens", routePage, s.uiMintToken},
+		{"POST", "/ui/tokens/{id}/revoke", routePage, s.uiRevokeToken},
+		{"POST", "/ui/avatar", routePage, s.uiUploadAvatar},
+		{"POST", "/ui/avatar/select", routePage, s.uiSelectAvatar},
+		{"POST", "/ui/avatar/delete", routePage, s.uiDeleteAvatar},
+		{"GET", "/ui/groups", routePage, s.uiGroups},
+		{"POST", "/ui/groups", routePage, s.uiCreateGroup},
+		{"GET", "/ui/groups/{name}", routePage, s.uiGroup},
+		{"POST", "/ui/groups/{name}/delete", routePage, s.uiDeleteGroup},
+		{"POST", "/ui/groups/{name}/members/{account}", routePage, s.uiAddMember},
+		{"POST", "/ui/groups/{name}/members/{account}/remove", routePage, s.uiRemoveMember},
+		{"GET", "/ui/accounts", routePage, s.uiSearchAccounts},
+
 		{"POST", "/session/logout", routeAPI, s.logout},
 		{"GET", "/providers", routeAPI, s.providers},
 		{"GET", "/healthz", routeAPI, s.healthz},

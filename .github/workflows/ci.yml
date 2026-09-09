@@ -13,8 +13,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - run: test -z "$(gofmt -l .)"
       - name: generated code matches api/openapi.yaml
         run: go generate ./api && git diff --exit-code -- api
+      - name: stylesheet matches the templates
+        run: cd internal/api/web && npm ci --silent && npm run build --silent && git diff --exit-code -- style.css
       - run: go vet ./...
       - run: go test ./...

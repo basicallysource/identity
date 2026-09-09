@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/basicallysource/identity/internal/store"
 )
 
 // Handoff is how a signed-in browser session becomes another service's
@@ -67,32 +69,40 @@ func (s *Server) handoff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, `send {"redirect_uri": "..."}`)
 		return
 	}
-	if body.CodeChallenge != "" {
-		decoded, err := base64.RawURLEncoding.DecodeString(body.CodeChallenge)
-		if err != nil || len(decoded) != 32 {
-			writeError(w, 400, "invalid code challenge")
-			return
-		}
-	}
-	if !s.redirectAllowed(body.RedirectURI) {
-		writeError(w, http.StatusForbidden, "sign-ins are not handed off to that destination")
+	code, fail := s.mintHandoff(account, credential, body.RedirectURI, body.CodeChallenge)
+	if fail != nil {
+		fail.write(w)
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]string{"code": code})
+}
 
+// mintHandoff is the code-minting half of a handoff, shared by the API and
+// the page: the destination must be allowed, the challenge well-formed, and
+// the code remembered against the credential that asked, so revoking that
+// sign-in kills the code too.
+func (s *Server) mintHandoff(account store.Account, credential store.Token, redirectURI, codeChallenge string) (string, *failure) {
+	if codeChallenge != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(codeChallenge)
+		if err != nil || len(decoded) != 32 {
+			return "", &failure{http.StatusBadRequest, "invalid code challenge", ""}
+		}
+	}
+	if !s.redirectAllowed(redirectURI) {
+		return "", &failure{http.StatusForbidden, "sign-ins are not handed off to that destination", ""}
+	}
 	code, err := newState()
 	if err != nil {
 		s.logger().Error("handoff: mint code", "error", err)
-		writeError(w, http.StatusInternalServerError, "could not start the handoff")
-		return
+		return "", &failure{http.StatusInternalServerError, "could not start the handoff", ""}
 	}
 	s.rememberFlow("code:"+code, pendingFlow{
 		accountID:     account.ID,
-		redirectURI:   body.RedirectURI,
-		codeChallenge: body.CodeChallenge,
+		redirectURI:   redirectURI,
+		codeChallenge: codeChallenge,
 		tokenID:       credential.ID,
 	}, handoffCodeTTL)
-
-	writeJSON(w, http.StatusOK, map[string]string{"code": code})
+	return code, nil
 }
 
 // exchange turns a one-time code into a fresh token for the service behind
