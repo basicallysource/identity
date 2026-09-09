@@ -1,0 +1,791 @@
+openapi: 3.0.3
+info:
+  title: identity
+  version: "1"
+  description: |
+    Who somebody is, once, for every service operated together. Sign in with
+    GitHub or Discord, get one account, carry it everywhere.
+
+    This file is the contract. `internal/api` implements it and a test holds
+    the two equal: every route is described here, every path here is a route,
+    and every response the test suite provokes is validated against these
+    schemas. The Go client in this package is generated from it; a TypeScript
+    client would be generated from the same file.
+
+    Two kinds of credential exist and the difference is the security model.
+    An **account token** comes from signing in here (or from `POST /v1/tokens`)
+    and may manage the account. An **application token** comes from
+    `POST /v1/exchange` and is bound to one application's origin (its
+    `token.audience`); it may call `/v1/whoami` and `/v1/avatar`, revoke
+    itself, and nothing else. A browser-facing service must hold only its own
+    application tokens, server-side, and must check `token.audience` against
+    its own origin before trusting a `whoami` answer.
+
+servers:
+  - url: /
+
+tags:
+  - name: session
+    description: Signing in and out at this service's own page.
+  - name: account
+    description: What a token says about its holder.
+  - name: handoff
+    description: Getting a browser signed in to another service.
+  - name: tokens
+    description: Account-token management.
+  - name: groups
+    description: Named sets of accounts; identity-admin only.
+
+security:
+  - bearer: []
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness.
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /providers:
+    get:
+      operationId: providers
+      summary: Which sign-in providers are configured.
+      security: []
+      responses:
+        "200":
+          description: One flag per provider.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [github, discord]
+                properties:
+                  github: { type: boolean }
+                  discord: { type: boolean }
+
+  /session/logout:
+    post:
+      operationId: logout
+      tags: [session]
+      summary: End the browser session at this service.
+      description: |
+        Revokes the account token behind the session cookie and clears the
+        cookie. Answers 204 even with no session. A cookie-authenticated
+        request must carry this service's own Origin.
+      security: []
+      responses:
+        "204": { description: Signed out. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /signin/github/start:
+    post:
+      operationId: githubStart
+      tags: [session]
+      summary: Begin the GitHub device flow.
+      description: |
+        Called with a bearer token, the flow links the proved GitHub identity
+        to that account instead of signing in.
+      security:
+        - {}
+        - bearer: []
+      responses:
+        "200":
+          description: A device code for the person to enter at GitHub.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "501": { $ref: "#/components/responses/Unconfigured" }
+        "502": { $ref: "#/components/responses/ProviderDown" }
+
+  /signin/github/finish:
+    post:
+      operationId: githubFinish
+      tags: [session]
+      summary: Poll the GitHub device flow.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_code]
+              properties:
+                device_code: { type: string }
+      responses:
+        "201":
+          description: "Signed in. With `X-Identity-Browser: 1` the token is set as a cookie and omitted from the body."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+        "200":
+          description: The flow was a link, and it completed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Linked" }
+        "202":
+          description: Not finished at GitHub yet. Poll again after the interval, longer on slow_down.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [pending, slow_down] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/Failure" }
+        "501": { $ref: "#/components/responses/Unconfigured" }
+        "502": { $ref: "#/components/responses/ProviderDown" }
+
+  /signin/discord/start:
+    post:
+      operationId: discordStart
+      tags: [session]
+      summary: Begin the Discord redirect flow.
+      description: |
+        Answers with the URL to send the browser to, and sets a state cookie
+        the callback must match. Called with a bearer token, the flow links
+        instead of signing in.
+      security:
+        - {}
+        - bearer: []
+      responses:
+        "200":
+          description: Where to send the browser.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url: { type: string, format: uri }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/Failure" }
+        "501": { $ref: "#/components/responses/Unconfigured" }
+
+  /signin/discord/callback:
+    get:
+      operationId: discordCallback
+      tags: [session]
+      summary: Where Discord sends the browser back.
+      security: []
+      parameters:
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: error, in: query, schema: { type: string } }
+      responses:
+        "303":
+          description: Signed in or linked; the session cookie is set and the browser is sent to the page.
+        "200":
+          description: The sign-in failed, explained as a page.
+          content:
+            text/html:
+              schema: { type: string }
+
+  /v1/whoami:
+    get:
+      operationId: whoami
+      tags: [account]
+      summary: Who a token belongs to.
+      description: |
+        The whole integration seam. A consuming service forwards the bearer
+        token it holds and gets the account, its provider identities, its
+        groups, and a description of the token itself. Check `token.audience`.
+      responses:
+        "200":
+          description: The account behind the token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Whoami" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /v1/avatar:
+    get:
+      operationId: avatar
+      tags: [account]
+      summary: The caller's profile photo, at a size.
+      parameters:
+        - name: size
+          in: query
+          description: Square display size in pixels, 16 to 1024. Default 128.
+          schema: { type: integer, minimum: 16, maximum: 1024 }
+        - name: source
+          in: query
+          description: A specific picture (`upload`, or a provider name) for a picker preview.
+          schema: { type: string }
+      responses:
+        "200":
+          description: The image, private and uncacheable.
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/ProviderDown" }
+    post:
+      operationId: uploadAvatar
+      tags: [account]
+      summary: Upload a profile photo.
+      description: Raw JPEG, PNG or WebP bytes with a matching Content-Type. Selects `upload` as the picture.
+      requestBody:
+        required: true
+        content:
+          image/jpeg: { schema: { type: string, format: binary } }
+          image/png: { schema: { type: string, format: binary } }
+          image/webp: { schema: { type: string, format: binary } }
+      responses:
+        "201":
+          description: Stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Avatar" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "415": { $ref: "#/components/responses/Unsupported" }
+        "429": { $ref: "#/components/responses/Throttled" }
+        "500": { $ref: "#/components/responses/Failure" }
+        "502": { $ref: "#/components/responses/ProviderDown" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    put:
+      operationId: selectAvatar
+      tags: [account]
+      summary: Choose which picture is the profile photo.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source: { type: string, description: "`upload` or a provider name." }
+      responses:
+        "204": { description: Selected. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      operationId: removeAvatar
+      tags: [account]
+      summary: Remove the uploaded photo. Provider pictures remain.
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /v1/handoff:
+    post:
+      operationId: handoff
+      tags: [handoff]
+      summary: Mint a one-time code for a consuming service's callback.
+      description: |
+        Called by this service's own page on behalf of the signed-in person.
+        The destination must be on the redirect allowlist. An optional S256
+        PKCE challenge binds the code to the verifier the service holds.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [redirect_uri]
+              properties:
+                redirect_uri: { type: string, format: uri }
+                code_challenge: { type: string, description: "base64url(SHA-256(verifier)), no padding." }
+      responses:
+        "200":
+          description: A code to carry to the callback, valid for two minutes, once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code]
+                properties:
+                  code: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /v1/exchange:
+    post:
+      operationId: exchange
+      tags: [handoff]
+      summary: Turn a one-time code into an application token.
+      description: |
+        Called server-side by the service behind the callback. The redirect
+        must match the one the code was minted for, and the verifier must
+        match the challenge if one was given. Any attempt consumes the code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, redirect_uri]
+              properties:
+                code: { type: string }
+                redirect_uri: { type: string, format: uri }
+                code_verifier: { type: string, minLength: 43, maxLength: 128 }
+      responses:
+        "201":
+          description: A fresh token whose audience is the callback's origin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/tokens:
+    get:
+      operationId: listTokens
+      tags: [tokens]
+      summary: The caller's live and recently revoked tokens.
+      responses:
+        "200":
+          description: Tokens, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tokens]
+                properties:
+                  tokens:
+                    type: array
+                    items: { $ref: "#/components/schemas/TokenInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/Failure" }
+    post:
+      operationId: mintToken
+      tags: [tokens]
+      summary: Mint a named account token.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        "201":
+          description: The token, shown once.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Token" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/tokens/{id}:
+    delete:
+      operationId: revokeToken
+      tags: [tokens]
+      summary: Revoke one of the caller's tokens.
+      description: An application token may revoke only itself.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /v1/groups:
+    get:
+      operationId: listGroups
+      tags: [groups]
+      summary: Every group, with member counts.
+      responses:
+        "200":
+          description: Groups by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups]
+                properties:
+                  groups:
+                    type: array
+                    items: { $ref: "#/components/schemas/Group" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/Failure" }
+    post:
+      operationId: createGroup
+      tags: [groups]
+      summary: Create an empty group.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { $ref: "#/components/schemas/GroupName" }
+                description: { type: string }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /v1/groups/audit:
+    get:
+      operationId: groupAudit
+      tags: [groups]
+      summary: Recent changes to groups and memberships, newest first.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200":
+          description: The log.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /v1/groups/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { $ref: "#/components/schemas/GroupName" } }
+    get:
+      operationId: getGroup
+      tags: [groups]
+      summary: One group and its members.
+      responses:
+        "200":
+          description: The group.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GroupDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Failure" }
+    delete:
+      operationId: deleteGroup
+      tags: [groups]
+      summary: Delete a group and every membership in it. identity-admin is refused.
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /v1/groups/{name}/members/{account}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { $ref: "#/components/schemas/GroupName" } }
+      - { name: account, in: path, required: true, schema: { $ref: "#/components/schemas/AccountID" } }
+    put:
+      operationId: addMember
+      tags: [groups]
+      summary: Put an account in a group. Idempotent.
+      responses:
+        "204": { description: The account is in the group. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Failure" }
+    delete:
+      operationId: removeMember
+      tags: [groups]
+      summary: Take an account out of a group. The last identity-admin is refused.
+      responses:
+        "204": { description: Removed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+  /v1/accounts:
+    get:
+      operationId: searchAccounts
+      tags: [groups]
+      summary: Find accounts by handle, to put one in a group.
+      description: |
+        Matches the account handle or any provider handle, case-insensitively.
+        Every identity is returned because two people can share a handle and
+        the provider id is what tells them apart. An empty query lists the
+        newest accounts.
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        "200":
+          description: Matches.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accounts]
+                properties:
+                  accounts:
+                    type: array
+                    items: { $ref: "#/components/schemas/Account" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/Failure" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: "`Authorization: Bearer bsid_...`"
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, description: "What went wrong, in a sentence." }
+
+    AccountID:
+      type: string
+      description: A random 12-character hex id. Stable for the life of the account.
+      pattern: "^[0-9a-f]{12}$"
+      example: 3f9c2a81d04b
+
+    GroupName:
+      type: string
+      description: Lowercase letters, digits and hyphens; 1 to 63 characters; starts with a letter or digit.
+      pattern: "^[a-z0-9][a-z0-9-]{0,62}$"
+      example: basically-core
+
+    Device:
+      type: object
+      required: [device_code, user_code, verification_uri, expires_in, interval]
+      properties:
+        device_code: { type: string, description: Opaque; send it to finish. }
+        user_code: { type: string, description: What the person types at GitHub. }
+        verification_uri: { type: string, format: uri }
+        expires_in: { type: integer, description: Seconds. }
+        interval: { type: integer, description: Minimum seconds between polls. }
+
+    Token:
+      type: object
+      description: A freshly minted credential. The token itself is shown exactly once.
+      required: [token, account, handle]
+      properties:
+        token: { type: string, description: "`bsid_<id>_<secret>`. Empty when set as a cookie instead." }
+        account: { $ref: "#/components/schemas/AccountID" }
+        handle: { type: string }
+        expires_at: { type: string, format: date-time }
+
+    TokenInfo:
+      type: object
+      description: A token as described, never including its secret.
+      required: [id, name, audience, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        audience:
+          type: string
+          description: The application origin this token is bound to; empty for an account token.
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked: { type: boolean }
+        current: { type: boolean, description: This is the token making the request. }
+
+    Linked:
+      type: object
+      required: [linked, provider, handle]
+      properties:
+        linked: { type: boolean, enum: [true] }
+        provider: { type: string, enum: [github, discord] }
+        handle: { type: string }
+
+    Avatar:
+      type: object
+      required: [id, width, height, source]
+      properties:
+        id: { type: string, description: Changes whenever the picture does; use it as a cache key. }
+        width: { type: integer }
+        height: { type: integer }
+        source: { type: string, description: "`upload`, `github` or `discord`." }
+
+    Identity:
+      type: object
+      description: One provider's proof of the account.
+      required: [provider, id, handle, proved_at]
+      properties:
+        provider: { type: string, enum: [github, discord] }
+        id: { type: string, description: "The provider's immutable id (GitHub's number, Discord's snowflake)." }
+        handle: { type: string, description: The provider login at the last proof. }
+        proved_at: { type: string, format: date-time }
+        avatar: { $ref: "#/components/schemas/Avatar" }
+
+    Whoami:
+      type: object
+      required: [account, handle, created_at, identities, groups, token, avatar_upload_enabled]
+      properties:
+        account: { $ref: "#/components/schemas/AccountID" }
+        handle: { type: string }
+        created_at: { type: string, format: date-time }
+        identities:
+          type: array
+          items: { $ref: "#/components/schemas/Identity" }
+        groups:
+          type: array
+          description: Every group the account is in, sorted. Always present; empty when none.
+          items: { $ref: "#/components/schemas/GroupName" }
+        token: { $ref: "#/components/schemas/TokenInfo" }
+        avatar: { $ref: "#/components/schemas/Avatar" }
+        uploaded_avatar: { $ref: "#/components/schemas/Avatar" }
+        avatar_upload_enabled: { type: boolean }
+
+    Group:
+      type: object
+      required: [name, description, created_at, created_by, members]
+      properties:
+        name: { $ref: "#/components/schemas/GroupName" }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string, description: "An account id, or `cli`." }
+        members: { type: integer, description: How many accounts are in it. }
+
+    Member:
+      type: object
+      required: [account, handle, added_at, added_by]
+      properties:
+        account: { $ref: "#/components/schemas/AccountID" }
+        handle: { type: string }
+        added_at: { type: string, format: date-time }
+        added_by: { type: string, description: "An account id, or `cli`." }
+
+    GroupDetail:
+      type: object
+      required: [name, description, created_at, created_by, members]
+      properties:
+        name: { $ref: "#/components/schemas/GroupName" }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/Member" }
+
+    AuditEntry:
+      type: object
+      required: [id, at, actor, action, group]
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        actor: { type: string, description: "The account id that made the change, or `cli`." }
+        action: { type: string, enum: [create-group, delete-group, add-member, remove-member] }
+        group: { $ref: "#/components/schemas/GroupName" }
+        account: { $ref: "#/components/schemas/AccountID" }
+        handle: { type: string, description: The member's handle at the time. }
+
+    Account:
+      type: object
+      description: An account as an administrator sees it.
+      required: [account, handle, created_at, identities, groups]
+      properties:
+        account: { $ref: "#/components/schemas/AccountID" }
+        handle: { type: string }
+        created_at: { type: string, format: date-time }
+        identities:
+          type: array
+          items: { $ref: "#/components/schemas/Identity" }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/GroupName" }
+
+  responses:
+    BadRequest:
+      description: The request was malformed; the error says how.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: No live bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The token exists but may not do this; the error says why.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such thing.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: It already exists, or belongs to somebody else.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: The body is over the limit.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unsupported:
+      description: Not a supported media type.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Throttled:
+      description: Too many attempts; Retry-After says when.
+      headers:
+        Retry-After:
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Failure:
+      description: This service could not do it.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unconfigured:
+      description: That provider or feature is not configured on this deployment.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unavailable:
+      description: Busy or not configured; try again.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ProviderDown:
+      description: GitHub, Discord or the asset store could not be reached.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

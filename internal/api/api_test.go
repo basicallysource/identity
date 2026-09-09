@@ -83,7 +83,8 @@ func newTestServer(t *testing.T) (*httptest.Server, *Server) {
 			UserURL:      discord.URL + "/me",
 		},
 	}
-	ts := httptest.NewServer(server.Handler())
+	// Every response is checked against api/openapi.yaml; see contract_test.go.
+	ts := httptest.NewServer(validating(t, server.Handler()))
 	t.Cleanup(ts.Close)
 	server.BaseURL = ts.URL
 	return ts, server

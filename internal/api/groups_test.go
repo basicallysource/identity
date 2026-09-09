@@ -71,8 +71,8 @@ func TestGroupAdministrationIsForAdminsOnly(t *testing.T) {
 		{"GET", "/v1/groups/audit"},
 		{"GET", "/v1/groups/core"},
 		{"DELETE", "/v1/groups/core"},
-		{"PUT", "/v1/groups/core/members/x"},
-		{"DELETE", "/v1/groups/core/members/x"},
+		{"PUT", "/v1/groups/core/members/000000000000"},
+		{"DELETE", "/v1/groups/core/members/000000000000"},
 		{"GET", "/v1/accounts?q=a"},
 	} {
 		if got := status(t, do(t, probe.method, ts.URL+probe.path, minted.Token, `{"name":"core"}`)); got != http.StatusForbidden {
@@ -128,7 +128,7 @@ func TestGroupAdministration(t *testing.T) {
 	if got := status(t, do(t, "PUT", ts.URL+"/v1/groups/core/members/"+other.ID, admin.Token, "")); got != http.StatusNoContent {
 		t.Fatalf("add answered %d", got)
 	}
-	if got := status(t, do(t, "PUT", ts.URL+"/v1/groups/core/members/nobody", admin.Token, "")); got != http.StatusNotFound {
+	if got := status(t, do(t, "PUT", ts.URL+"/v1/groups/core/members/000000000000", admin.Token, "")); got != http.StatusNotFound {
 		t.Fatalf("adding nobody answered %d", got)
 	}
 	detail := decode[groupDetailBody](t, do(t, "GET", ts.URL+"/v1/groups/core", admin.Token, ""))
