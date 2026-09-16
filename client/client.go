@@ -26,7 +26,10 @@
 //	mux.Handle("/admin/", auth.RequireGroup("basically-core", adminHandler))
 //	mux.Handle("/", auth.Require(pageHandler))
 //
-// and in a handler behind Require, client.WhoFrom(r.Context()) is the person.
+// and in a handler behind Require, client.WhoFrom(r.Context()) is the person
+// and client.TokenFrom(r.Context()) their token, for calls made to identity on
+// their behalf. Anything that answers who is signed in itself, outside a gate,
+// asks auth.Check(r), which tells signed out from identity being unreachable.
 //
 // A page with its own sign-in button follows SilentSignInURL first, once per
 // browser session: a person already signed in at identity comes straight
@@ -428,7 +431,7 @@ func (a *Auth) signout(w http.ResponseWriter, r *http.Request) {
 // "silent_signin" is there only until this browser session has tried it or
 // signed out here: a page follows it, once, before showing the button. 503 means identity could not be asked, which is neither answer.
 func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
-	who, err := a.who(r)
+	who, err := a.Check(r)
 	if errors.Is(err, ErrUnavailable) {
 		a.cfg.Logger.Warn("identity client: whoami", "error", err)
 		a.fail(w, http.StatusServiceUnavailable, "sign-in is unavailable; try again shortly")
@@ -465,21 +468,22 @@ var ErrSignedOut = errors.New("identity client: not signed in")
 // says nothing about the token, so nobody is signed out over it.
 var ErrUnavailable = errors.New("identity client: identity is unavailable")
 
-// Who resolves the request's session to the person behind it, asking
-// identity at most once per Recheck per session. false means signed out,
-// expired, or revoked, or that identity could not be asked; Require tells
-// those apart.
-func (a *Auth) Who(r *http.Request) (Who, bool) {
-	who, err := a.who(r)
-	return who, err == nil
+// Check resolves the request's session to the person behind it, asking
+// identity at most once per Recheck per session. The error is ErrSignedOut
+// (no session, or identity said no) or ErrUnavailable (identity could not be
+// asked, which says nothing about the session), to be told apart with
+// errors.Is. It is for code that answers who is signed in itself; a handler
+// behind Require already has the answer. Check changes no cookie.
+func (a *Auth) Check(r *http.Request) (Who, error) {
+	token, _ := a.token(r)
+	return a.WhoToken(r.Context(), token)
 }
 
-func (a *Auth) who(r *http.Request) (Who, error) {
-	token, ok := a.token(r)
-	if !ok {
-		return Who{}, ErrSignedOut
-	}
-	return a.WhoToken(r.Context(), token)
+// Who is Check as a yes or no: false is signed out, or identity could not be
+// asked.
+func (a *Auth) Who(r *http.Request) (Who, bool) {
+	who, err := a.Check(r)
+	return who, err == nil
 }
 
 // WhoToken is Who for a token that arrived some other way, such as a
@@ -630,6 +634,8 @@ func (a *Auth) forget(token string) {
 
 type whoKey struct{}
 
+type tokenKey struct{}
+
 // WhoFrom is the person behind a request that passed Require or
 // RequireGroup.
 func WhoFrom(ctx context.Context) (Who, bool) {
@@ -637,13 +643,24 @@ func WhoFrom(ctx context.Context) (Who, bool) {
 	return who, ok
 }
 
-// Require lets only signed-in people through, and puts them in the
-// context. A browser asking for a page is sent to sign in and brought back;
-// anything else gets 401. When identity cannot be asked, everybody gets 503
-// and keeps their session.
+// TokenFrom is the identity token behind a request that passed Require or
+// RequireGroup, for calls this service makes to identity on the person's
+// behalf, such as their profile photo. It is their credential, handed off to
+// this service: send it to identity and nowhere else, and never log it or
+// put it in an answer. Who never carries it.
+func TokenFrom(ctx context.Context) (string, bool) {
+	token, _ := ctx.Value(tokenKey{}).(string)
+	return token, token != ""
+}
+
+// Require lets only signed-in people through, and puts them and their token
+// in the context. A browser asking for a page is sent to sign in and brought
+// back; anything else gets 401. When identity cannot be asked, everybody gets
+// 503 and keeps their session.
 func (a *Auth) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		who, err := a.who(r)
+		token, _ := a.token(r)
+		who, err := a.WhoToken(r.Context(), token)
 		if errors.Is(err, ErrUnavailable) {
 			// Not knowing is not a no. Keep the session, and do not send the
 			// browser off to mint another token for the same person.
@@ -662,7 +679,8 @@ func (a *Auth) Require(next http.Handler) http.Handler {
 			a.fail(w, http.StatusUnauthorized, "sign in required")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), whoKey{}, who)))
+		ctx := context.WithValue(context.WithValue(r.Context(), whoKey{}, who), tokenKey{}, token)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

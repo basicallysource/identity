@@ -35,7 +35,13 @@ mux.Handle("/", auth.Require(pageHandler))
 ```
 
 Behind `Require`, `client.WhoFrom(r.Context())` is the person: account id,
-handle, provider identities, and `who.In("group")`. The browser is sent to
+handle, provider identities, and `who.In("group")`. `client.TokenFrom(r.Context())`
+is their token, for calls the service makes to identity on their behalf, such
+as their profile photo; it goes nowhere else. Code that answers who is signed
+in itself, outside a gate, uses `auth.Check(r)`, whose error tells
+`client.ErrSignedOut` from `client.ErrUnavailable` (identity could not be
+asked, so say neither yes nor no), and a script's bearer token is checked with
+`auth.WhoToken(ctx, token)`. The browser is sent to
 `/authorize` here with a PKCE challenge, comes back with a one-time code, the
 code is exchanged server-side for an application token, and that token lives
 sealed inside an HttpOnly cookie. Every `whoami` answer is checked against

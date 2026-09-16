@@ -1,11 +1,13 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,6 +34,7 @@ type harness struct {
 	app      *httptest.Server
 	auth     *Auth
 	cookies  map[string]*http.Cookie
+	logs     *logs
 	// account token of the signed-in person at identity; empty is a browser
 	// nobody is signed in to identity with
 	identityToken   string
@@ -80,8 +83,9 @@ func (h *harness) startApp() {
 	mux := http.NewServeMux()
 	h.app = httptest.NewServer(mux)
 	h.t.Cleanup(h.app.Close)
+	h.logs = &logs{}
 	var err error
-	h.auth, err = New(Config{IdentityURL: h.identity.URL, BaseURL: h.app.URL, Key: key, Recheck: 50 * time.Millisecond})
+	h.auth, err = New(Config{IdentityURL: h.identity.URL, BaseURL: h.app.URL, Key: key, Recheck: 50 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(h.logs, nil))})
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -90,6 +94,13 @@ func (h *harness) startApp() {
 		who, _ := WhoFrom(r.Context())
 		io.WriteString(w, "hello "+who.Handle)
 	})))
+	// What a handler finds for TokenFrom, behind the gate and outside it.
+	tokenFrom := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := TokenFrom(r.Context())
+		json.NewEncoder(w).Encode(map[string]any{"token": token, "ok": ok})
+	})
+	mux.Handle("/token", h.auth.Require(tokenFrom))
+	mux.Handle("/open", tokenFrom)
 	mux.Handle("/admin", h.auth.RequireGroup("core", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "admin")
 	})))
@@ -176,6 +187,32 @@ func (h *harness) me(headers map[string]string) map[string]any {
 		h.t.Fatalf("/auth/me answered %d: %v", resp.StatusCode, err)
 	}
 	return me
+}
+
+// logs is everything the app logged, safe to read while it serves.
+type logs struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *logs) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *logs) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+// request is the browser's next request to the app, as a handler would get
+// it, for calling Auth directly.
+func (h *harness) request() *http.Request {
+	req := httptest.NewRequest(http.MethodGet, h.app.URL+"/", nil)
+	h.addCookies(req)
+	return req
 }
 
 func mustHost(raw string) string {
@@ -607,6 +644,11 @@ func TestIdentityOutageKeepsTheSession(t *testing.T) {
 		}
 	}
 
+	// The outage is logged, and the token is not.
+	if logged := h.logs.String(); !strings.Contains(logged, "identity client: whoami") || strings.Contains(logged, "bsid_app") {
+		t.Fatalf("logs during the outage: %s", logged)
+	}
+
 	// Identity back, the same session works.
 	fake.set(http.StatusOK, h.app.URL)
 	if resp := h.get(h.app.URL+"/secret", nil); resp.StatusCode != http.StatusOK {
@@ -678,6 +720,87 @@ func TestWhoTokenForBearerCallers(t *testing.T) {
 	for name, tk := range map[string]string{"account token": h.identityToken, "garbage": "bsid_nope", "empty": ""} {
 		if _, err := h.auth.WhoToken(context.Background(), tk); !errors.Is(err, ErrSignedOut) {
 			t.Errorf("WhoToken(%s) = %v", name, err)
+		}
+	}
+}
+
+func TestTokenFromBehindTheGateOnly(t *testing.T) {
+	h := newHarness(t)
+	tokenAt := func(path string) (string, bool) {
+		t.Helper()
+		resp := h.get(h.app.URL+path, nil)
+		var got struct {
+			Token string
+			OK    bool
+		}
+		if resp.StatusCode != http.StatusOK || json.Unmarshal([]byte(body(resp)), &got) != nil {
+			t.Fatalf("%s answered %d", path, resp.StatusCode)
+		}
+		return got.Token, got.OK
+	}
+	if token, ok := TokenFrom(context.Background()); ok || token != "" {
+		t.Fatalf("TokenFrom outside any request = %q, %v", token, ok)
+	}
+	if token, ok := tokenAt("/open"); ok || token != "" {
+		t.Fatalf("TokenFrom while signed out = %q, %v", token, ok)
+	}
+
+	h.signIn("/token")
+	c, _ := h.cookie("session")
+	var s session
+	if err := h.auth.unseal(c.Value, &s); err != nil {
+		t.Fatal(err)
+	}
+	token, ok := tokenAt("/token")
+	if !ok || token != s.Token {
+		t.Fatalf("TokenFrom behind Require = %q, %v", token, ok)
+	}
+	// It is the person's token for this service, which identity accepts.
+	who, err := h.auth.WhoToken(context.Background(), token)
+	if err != nil || who.Handle != "octocat" {
+		t.Fatalf("WhoToken(TokenFrom) = %+v, %v", who, err)
+	}
+	// A handler outside the gate gets nothing, even with a live session.
+	if token, ok := tokenAt("/open"); ok || token != "" {
+		t.Fatalf("TokenFrom outside Require = %q, %v", token, ok)
+	}
+	if raw, _ := json.Marshal(who); strings.Contains(string(raw), token) {
+		t.Fatal("the token is in Who")
+	}
+}
+
+func TestCheckTellsSignedOutFromUnavailable(t *testing.T) {
+	h, fake := newFakeHarness(t)
+	if _, err := h.auth.Check(h.request()); !errors.Is(err, ErrSignedOut) {
+		t.Fatalf("no session: %v", err)
+	}
+	h.cookies[mustHost(h.app.URL)+"|session"] = &http.Cookie{Name: "session", Value: "forged"}
+	if _, err := h.auth.Check(h.request()); !errors.Is(err, ErrSignedOut) {
+		t.Fatalf("a forged cookie: %v", err)
+	}
+
+	h.plantSession("bsid_app")
+	if who, err := h.auth.Check(h.request()); err != nil || who.Handle != "octocat" {
+		t.Fatalf("signed in: %+v, %v", who, err)
+	}
+	for name, answer := range map[string]int{"a 5xx": http.StatusBadGateway, "no answer": 0} {
+		fake.set(answer, h.app.URL)
+		time.Sleep(60 * time.Millisecond)
+		if _, err := h.auth.Check(h.request()); !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrSignedOut) {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, ok := h.auth.Who(h.request()); ok {
+			t.Fatalf("%s: Who said yes", name)
+		}
+	}
+	for name, set := range map[string]func(){
+		"401":            func() { fake.set(http.StatusUnauthorized, h.app.URL) },
+		"other audience": func() { fake.set(http.StatusOK, "https://other.example") },
+	} {
+		set()
+		time.Sleep(60 * time.Millisecond)
+		if _, err := h.auth.Check(h.request()); !errors.Is(err, ErrSignedOut) {
+			t.Fatalf("%s: %v", name, err)
 		}
 	}
 }
