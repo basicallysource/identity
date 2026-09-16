@@ -17,9 +17,14 @@ info:
     and may manage the account. An **application token** comes from
     `POST /v1/exchange` and is bound to one application's origin (its
     `token.audience`); it may call `/v1/whoami` and `/v1/avatar`, revoke
-    itself, and nothing else. A browser-facing service must hold only its own
-    application tokens, server-side, and must check `token.audience` against
-    its own origin before trusting a `whoami` answer.
+    itself, sign its browser out with `/v1/signout`, and nothing else. A
+    browser-facing service must hold only its own application tokens,
+    server-side, and must check `token.audience` against its own origin
+    before trusting a `whoami` answer.
+
+    An application token minted for a browser that signed in here is linked
+    to that sign-in: revoking the sign-in revokes the token, and signing in to
+    the same application again from the same sign-in replaces it.
 
 servers:
   - url: /
@@ -75,9 +80,10 @@ paths:
       tags: [session]
       summary: End the browser session at this service.
       description: |
-        Revokes the account token behind the session cookie and clears the
-        cookie. Answers 204 even with no session. A cookie-authenticated
-        request must carry this service's own Origin.
+        Revokes the account token behind the session cookie, and every
+        application token minted from that sign-in, and clears the cookie.
+        Answers 204 even with no session. The request must carry this
+        service's own Origin.
       security: []
       responses:
         "204": { description: Signed out. }
@@ -294,9 +300,12 @@ paths:
       tags: [handoff]
       summary: Mint a one-time code for a consuming service's callback.
       description: |
-        Called by this service's own page on behalf of the signed-in person.
-        The destination must be on the redirect allowlist. An optional S256
-        PKCE challenge binds the code to the verifier the service holds.
+        Called with a bearer account token, to make a credential for a service
+        outside a browser. The destination must be on the redirect allowlist.
+        An optional S256 PKCE challenge binds the code to the verifier the
+        service holds. The token the code becomes is linked to no sign-in, so
+        nothing a browser does revokes it. This service's own page mints the
+        codes it hands to browsers itself.
       requestBody:
         required: true
         content:
@@ -331,6 +340,10 @@ paths:
         Called server-side by the service behind the callback. The redirect
         must match the one the code was minted for, and the verifier must
         match the challenge if one was given. Any attempt consumes the code.
+        A code the page minted for a signed-in browser becomes a token linked
+        to that sign-in, and replaces the token that sign-in last got for the
+        same application. A code minted through `POST /v1/handoff` becomes a
+        token that stands alone.
       security: []
       requestBody:
         required: true
@@ -351,6 +364,23 @@ paths:
               schema: { $ref: "#/components/schemas/Token" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/signout:
+    post:
+      operationId: signOut
+      tags: [handoff]
+      summary: Sign a browser out here and at every application it signed in to.
+      description: |
+        Called server-side by an application, with the application token of
+        the session it is ending. When that token was minted for a browser
+        signed in here, the sign-in is revoked, and with it every application
+        token minted from it, this one included. Any other token is revoked
+        alone, with anything minted from it. Answers 204 either way.
+      responses:
+        "204": { description: Signed out. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/Failure" }
 
   /v1/tokens:
     get:
@@ -376,6 +406,9 @@ paths:
       operationId: mintToken
       tags: [tokens]
       summary: Mint a named account token.
+      description: |
+        At most 25 account tokens are live at once; application tokens do not
+        count toward it.
       requestBody:
         required: false
         content:
@@ -398,7 +431,9 @@ paths:
       operationId: revokeToken
       tags: [tokens]
       summary: Revoke one of the caller's tokens.
-      description: An application token may revoke only itself.
+      description: |
+        Revoking a token revokes every application token minted from it. An
+        application token may revoke only itself.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:

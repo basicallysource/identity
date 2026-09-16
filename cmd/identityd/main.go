@@ -9,7 +9,7 @@
 //	IDENTITY_DISCORD_CLIENT_ID      Discord application
 //	IDENTITY_DISCORD_CLIENT_SECRET  its secret
 //	IDENTITY_CLIENT_IP_HEADER       proxy header carrying the real client IP
-//	IDENTITY_REDIRECT_ALLOW         comma-separated URL prefixes handoffs may go to
+//	IDENTITY_REDIRECT_ALLOW         comma-separated callback URLs handoffs may go to
 //	IDENTITY_ASSET_URL              asset-service API origin
 //	IDENTITY_ASSET_TOKEN            scoped profile-photo service credential
 //	IDENTITY_ASSET_NAMESPACE        private profile-photo namespace

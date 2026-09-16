@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -24,6 +25,12 @@ import (
 // removed that our own services do not need: no client secrets (possession
 // of an allowed callback URL is the client identity), no scopes, no consent
 // screen. If third-party consumers ever appear, those come back.
+//
+// A token handed off from the browser signed in here is linked to that
+// sign-in (its parent), which is what makes one sign-in carry across every
+// service and one sign-out end it everywhere: revoking the sign-in revokes
+// every token minted from it. A code asked for through the API by a bearer
+// token is a deliberate machine credential and stands alone.
 
 // handoffCodeTTL is how long the browser has to carry a code across one
 // redirect. Codes are single-use either way.
@@ -53,7 +60,8 @@ func (s *Server) redirectAllowed(uri string) bool {
 	return false
 }
 
-// handoff mints a one-time code for the caller's own account.
+// handoff mints a one-time code for the caller's own account. The token it
+// becomes has no parent: nothing but its own revocation ends it.
 func (s *Server) handoff(w http.ResponseWriter, r *http.Request) {
 	account, credential, err := s.authenticate(r)
 	if err != nil {
@@ -69,7 +77,7 @@ func (s *Server) handoff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, `send {"redirect_uri": "..."}`)
 		return
 	}
-	code, fail := s.mintHandoff(account, credential, body.RedirectURI, body.CodeChallenge)
+	code, fail := s.mintHandoff(account, credential, "", body.RedirectURI, body.CodeChallenge)
 	if fail != nil {
 		fail.write(w)
 		return
@@ -80,8 +88,9 @@ func (s *Server) handoff(w http.ResponseWriter, r *http.Request) {
 // mintHandoff is the code-minting half of a handoff, shared by the API and
 // the page: the destination must be allowed, the challenge well-formed, and
 // the code remembered against the credential that asked, so revoking that
-// sign-in kills the code too.
-func (s *Server) mintHandoff(account store.Account, credential store.Token, redirectURI, codeChallenge string) (string, *failure) {
+// sign-in kills the code too. parent is the sign-in the eventual token is
+// linked to: the page's own session, or empty.
+func (s *Server) mintHandoff(account store.Account, credential store.Token, parent, redirectURI, codeChallenge string) (string, *failure) {
 	if codeChallenge != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(codeChallenge)
 		if err != nil || len(decoded) != 32 {
@@ -101,6 +110,7 @@ func (s *Server) mintHandoff(account store.Account, credential store.Token, redi
 		redirectURI:   redirectURI,
 		codeChallenge: codeChallenge,
 		tokenID:       credential.ID,
+		parentID:      parent,
 	}, handoffCodeTTL)
 	return code, nil
 }
@@ -133,8 +143,8 @@ func (s *Server) exchange(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	parent, err := s.Store.TokenByID(r.Context(), flow.tokenID)
-	if err != nil || !parent.Live(s.now()) {
+	asker, err := s.Store.TokenByID(r.Context(), flow.tokenID)
+	if err != nil || !asker.Live(s.now()) {
 		writeError(w, 403, "sign-in was revoked")
 		return
 	}
@@ -145,13 +155,49 @@ func (s *Server) exchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	minted, err := s.issue(r, account, "handoff "+redirectHost(flow.redirectURI), redirectOrigin(flow.redirectURI))
+	minted, err := s.issue(r, account, "handoff "+redirectHost(flow.redirectURI), redirectOrigin(flow.redirectURI), flow.parentID)
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	s.logger().Info("handed off a sign-in", "account", account.ID, "to", redirectHost(flow.redirectURI))
 	writeJSON(w, http.StatusCreated, minted)
+}
+
+// signout is a service ending its browser's session, with the token that
+// session holds. The token's parent is the browser's sign-in here; revoking
+// it revokes every token minted from it, the caller's included, so the
+// browser is signed out here and at every service it reached. A token with
+// no parent is revoked alone, with anything minted from it.
+func (s *Server) signout(w http.ResponseWriter, r *http.Request) {
+	account, credential, err := s.authenticate(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "a live bearer token is required")
+		return
+	}
+	session := credential.ID
+	if credential.ParentID != "" {
+		session = credential.ParentID
+	}
+	// A sign-in that was already revoked is not found, but its children,
+	// the caller among them, are revoked all the same: still a sign-out.
+	if err := s.Store.RevokeToken(r.Context(), account.ID, session); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.logger().Error("signout", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not sign out")
+		return
+	}
+	s.logger().Info("signed a browser out", "account", account.ID, "from", credential.Audience)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// callbackRedirect is a consuming service's callback with an answer added
+// to whatever query it already carries.
+func callbackRedirect(redirectURI string, answer url.Values) string {
+	glue := "?"
+	if strings.Contains(redirectURI, "?") {
+		glue = "&"
+	}
+	return redirectURI + glue + answer.Encode()
 }
 
 func redirectHost(uri string) string {

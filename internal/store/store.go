@@ -59,13 +59,15 @@ type Identity struct {
 
 // Token is a credential as the store holds it: id in the clear, secret only
 // as a hash. ExpiresAt zero means it does not expire; RevokedAt zero means it
-// has not been revoked.
+// has not been revoked. ParentID is the browser sign-in an application token
+// was minted from, or empty: revoking a token revokes the tokens that name it.
 type Token struct {
 	ID         string
 	SecretHash string
 	AccountID  string
 	Name       string
 	Audience   string
+	ParentID   string
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	RevokedAt  time.Time
@@ -143,6 +145,19 @@ ALTER TABLE identities ADD COLUMN avatar_height INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE identities ADD COLUMN linked_at TEXT NOT NULL DEFAULT '';
 UPDATE identities SET linked_at=proved_at WHERE linked_at='';
 PRAGMA user_version = 3;
+COMMIT;`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	// parent_id links an application token to the browser sign-in it came
+	// from. It has a default, and every statement names its columns, so a
+	// binary from before it runs against a migrated database unchanged.
+	if schema_version < 4 {
+		if _, err := db.Exec(`BEGIN;
+ALTER TABLE tokens ADD COLUMN parent_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS tokens_parent ON tokens(parent_id);
+PRAGMA user_version = 4;
 COMMIT;`); err != nil {
 			db.Close()
 			return nil, err
@@ -370,6 +385,42 @@ func (db *DB) IdentitiesFor(ctx context.Context, accountID string) ([]Identity, 
 
 // InsertToken records a freshly minted token.
 func (db *DB) InsertToken(ctx context.Context, t Token) error {
+	return insertToken(ctx, db.sql, t)
+}
+
+// ReplaceToken records an application token minted from a browser sign-in
+// and, in the same transaction, revokes every live token that sign-in holds
+// for the same audience: a browser signing in to an application again
+// replaces its own token rather than adding one. A token with no parent is
+// refused, so a credential minted any other way is never replaced.
+func (db *DB) ReplaceToken(ctx context.Context, t Token) error {
+	if t.ParentID == "" || t.Audience == "" {
+		return errors.New("store: only an application token minted from a sign-in replaces another")
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin replace token: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := t.CreatedAt.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tokens SET revoked_at = ?
+		 WHERE account_id = ? AND parent_id = ? AND audience = ? AND revoked_at IS NULL
+		   AND (expires_at IS NULL OR expires_at > ?)`,
+		now, t.AccountID, t.ParentID, t.Audience, now); err != nil {
+		return fmt.Errorf("store: replace token for %s: %w", t.Audience, err)
+	}
+	if err := insertToken(ctx, tx, t); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit replace token: %w", err)
+	}
+	return nil
+}
+
+func insertToken(ctx context.Context, x execer, t Token) error {
 	var expires, revoked any
 	if !t.ExpiresAt.IsZero() {
 		expires = t.ExpiresAt.UTC().Format(time.RFC3339Nano)
@@ -377,10 +428,10 @@ func (db *DB) InsertToken(ctx context.Context, t Token) error {
 	if !t.RevokedAt.IsZero() {
 		revoked = t.RevokedAt.UTC().Format(time.RFC3339Nano)
 	}
-	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO tokens (id, secret_hash, account_id, name, audience, created_at, expires_at, revoked_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.SecretHash, t.AccountID, t.Name, t.Audience,
+	_, err := x.ExecContext(ctx,
+		`INSERT INTO tokens (id, secret_hash, account_id, name, audience, parent_id, created_at, expires_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.SecretHash, t.AccountID, t.Name, t.Audience, t.ParentID,
 		t.CreatedAt.UTC().Format(time.RFC3339Nano), expires, revoked)
 	if err != nil {
 		return fmt.Errorf("store: insert token %s: %w", t.ID, err)
@@ -391,7 +442,7 @@ func (db *DB) InsertToken(ctx context.Context, t Token) error {
 // TokenByID returns one token, or ErrNotFound.
 func (db *DB) TokenByID(ctx context.Context, id string) (Token, error) {
 	row := db.sql.QueryRowContext(ctx,
-		`SELECT id, secret_hash, account_id, name, audience, created_at, expires_at, revoked_at
+		`SELECT id, secret_hash, account_id, name, audience, parent_id, created_at, expires_at, revoked_at
 		 FROM tokens WHERE id = ?`, id)
 	return scanToken(row.Scan)
 }
@@ -399,7 +450,7 @@ func (db *DB) TokenByID(ctx context.Context, id string) (Token, error) {
 // TokensFor lists an account's tokens, newest first.
 func (db *DB) TokensFor(ctx context.Context, accountID string) ([]Token, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT id, secret_hash, account_id, name, audience, created_at, expires_at, revoked_at
+		`SELECT id, secret_hash, account_id, name, audience, parent_id, created_at, expires_at, revoked_at
 		 FROM tokens WHERE account_id = ? ORDER BY created_at DESC`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("store: tokens for %s: %w", accountID, err)
@@ -417,13 +468,15 @@ func (db *DB) TokensFor(ctx context.Context, accountID string) ([]Token, error) 
 	return tokens, rows.Err()
 }
 
-// LiveTokenCount counts an account's usable tokens, so "make another one"
-// cannot go on forever.
-func (db *DB) LiveTokenCount(ctx context.Context, accountID string, now time.Time) (int, error) {
+// LiveAccountTokenCount counts an account's usable account tokens (no
+// audience), so "make another one" cannot go on forever. Application tokens
+// are not counted: the ones a browser sign-in mints are bounded by
+// ReplaceToken instead, one per sign-in and application.
+func (db *DB) LiveAccountTokenCount(ctx context.Context, accountID string, now time.Time) (int, error) {
 	var count int
 	err := db.sql.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM tokens
-		 WHERE account_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+		 WHERE account_id = ? AND audience = '' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
 		accountID, now.UTC().Format(time.RFC3339Nano)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("store: live tokens for %s: %w", accountID, err)
@@ -431,14 +484,37 @@ func (db *DB) LiveTokenCount(ctx context.Context, accountID string, now time.Tim
 	return count, nil
 }
 
-// RevokeToken makes one of an account's tokens stop working. The account id
-// is part of the key so nobody can revoke somebody else's token by id alone.
+// RevokeToken makes one of an account's tokens stop working, and every token
+// minted from it with it, in one transaction: revoking a browser sign-in
+// signs that browser out of every application it went on to. The children
+// go even when the token itself was already dead, which is ErrNotFound. The
+// account id is part of the key so nobody can revoke somebody else's token
+// by id alone.
 func (db *DB) RevokeToken(ctx context.Context, accountID, tokenID string) error {
-	res, err := db.sql.ExecContext(ctx,
+	if tokenID == "" {
+		// An empty id would name every token that has no parent.
+		return ErrNotFound
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin revoke token: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := tx.ExecContext(ctx,
 		`UPDATE tokens SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at IS NULL`,
-		time.Now().UTC().Format(time.RFC3339Nano), tokenID, accountID)
+		now, tokenID, accountID)
 	if err != nil {
 		return fmt.Errorf("store: revoke token %s: %w", tokenID, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tokens SET revoked_at = ? WHERE parent_id = ? AND account_id = ? AND revoked_at IS NULL`,
+		now, tokenID, accountID); err != nil {
+		return fmt.Errorf("store: revoke tokens minted from %s: %w", tokenID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit revoke token: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
@@ -450,7 +526,7 @@ func scanToken(scan func(...any) error) (Token, error) {
 	var t Token
 	var created string
 	var expires, revoked sql.NullString
-	err := scan(&t.ID, &t.SecretHash, &t.AccountID, &t.Name, &t.Audience, &created, &expires, &revoked)
+	err := scan(&t.ID, &t.SecretHash, &t.AccountID, &t.Name, &t.Audience, &t.ParentID, &created, &expires, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Token{}, ErrNotFound
 	}

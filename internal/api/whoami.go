@@ -157,7 +157,7 @@ func (s *Server) mintToken(w http.ResponseWriter, r *http.Request) {
 		name = "token"
 	}
 
-	minted, err := s.issue(r, account, name, "")
+	minted, err := s.issue(r, account, name, "", "")
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return

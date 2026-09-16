@@ -57,6 +57,17 @@ func (d *Discord) Authorize(state, redirectURI string) string {
 	return pick(d.AuthorizeURL, defaultDiscordAuthorizeURL) + "?" + query.Encode()
 }
 
+// AuthorizeOrigin is the origin Authorize sends the browser to, which a page
+// that starts the flow with a form post must allow as a form-action: a
+// browser holds the redirect after a form post to that directive too.
+func (d *Discord) AuthorizeOrigin() string {
+	parsed, err := url.Parse(pick(d.AuthorizeURL, defaultDiscordAuthorizeURL))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
 // Redeem exchanges a callback's code for the identity behind it.
 func (d *Discord) Redeem(ctx context.Context, code, redirectURI string) (User, error) {
 	if !d.Configured() {

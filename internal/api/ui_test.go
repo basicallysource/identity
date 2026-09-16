@@ -226,6 +226,63 @@ func TestPageHandsOffToAConsumingService(t *testing.T) {
 	}
 }
 
+// prompt=none is a service asking whether the browser is signed in here
+// without showing anything: a code if it is, login_required if not, and a
+// callback off the allowlist is refused exactly as without it.
+func TestSilentAuthorize(t *testing.T) {
+	ts, server := newTestServer(t)
+	server.RedirectAllow = []string{"https://app.example/auth/callback", "https://app.example/q/"}
+	b := newBrowser(t, ts)
+	silent := func(callback string) (int, *url.URL, string) {
+		t.Helper()
+		status, body, header := b.page(http.MethodGet, "/authorize?"+url.Values{"redirect_uri": {callback}, "state": {"xyz"}, "prompt": {"none"}}.Encode(), nil)
+		location, err := url.Parse(header.Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return status, location, body
+	}
+
+	// Signed out: straight back, told so, with the service's state, and
+	// nothing kept here.
+	status, location, _ := silent("https://app.example/auth/callback")
+	if q := location.Query(); status != http.StatusSeeOther || location.Host != "app.example" || location.Path != "/auth/callback" || q.Get("error") != "login_required" || q.Get("state") != "xyz" || q.Get("code") != "" {
+		t.Fatalf("silent authorize signed out: %d %q", status, location)
+	}
+	if _, ok := b.cookies[authorizeCookie]; ok {
+		t.Fatal("a silent authorize request was kept")
+	}
+	// The answer joins a query the callback already carries.
+	status, location, _ = silent("https://app.example/q/callback?site=docs")
+	if q := location.Query(); status != http.StatusSeeOther || q.Get("site") != "docs" || q.Get("error") != "login_required" || q.Get("state") != "xyz" {
+		t.Fatalf("silent authorize to a callback with a query: %d %q", status, location)
+	}
+
+	// Off the allowlist: the refusal page, no redirect, nothing kept.
+	status, location, body := silent("https://evil.example/cb")
+	if status != http.StatusForbidden || location.String() != "" || !strings.Contains(body, "not handed off") {
+		t.Fatalf("silent authorize to a foreign callback: %d %q", status, location)
+	}
+	if _, ok := b.cookies[authorizeCookie]; ok {
+		t.Fatal("a refused silent authorize request was kept")
+	}
+
+	// Signed in: a code, exactly as for any authorize.
+	b.signInViaPage()
+	status, location, _ = silent("https://app.example/auth/callback")
+	if q := location.Query(); status != http.StatusSeeOther || location.Host != "app.example" || q.Get("code") == "" || q.Get("state") != "xyz" || q.Get("error") != "" {
+		t.Fatalf("silent authorize signed in: %d %q", status, location)
+	}
+	exchanged := post(t, ts.URL+"/v1/exchange", "", fmt.Sprintf(`{"code":%q,"redirect_uri":"https://app.example/auth/callback"}`, location.Query().Get("code")))
+	if exchanged.StatusCode != http.StatusCreated {
+		t.Fatalf("exchange answered %d", exchanged.StatusCode)
+	}
+	service := decode[tokenResponse](t, exchanged)
+	if me := decode[whoamiResponse](t, do(t, "GET", ts.URL+"/v1/whoami", service.Token, "")); me.Token.Audience != "https://app.example" {
+		t.Fatalf("service token describes %+v", me)
+	}
+}
+
 func TestPageGroupAdministration(t *testing.T) {
 	ts, server := newTestServer(t)
 	b := newBrowser(t, ts)

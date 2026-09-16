@@ -22,9 +22,9 @@ import (
 )
 
 // Token policy. Tokens expire so a leaked one has a horizon, and the live
-// count is capped so "make another one" cannot go on forever. Both are
-// service-wide: this service has no tiers, because authorization is each
-// consuming service's own business.
+// count of account tokens is capped so "make another one" cannot go on
+// forever. Both are service-wide: this service has no tiers, because
+// authorization is each consuming service's own business.
 const (
 	tokenLifetime  = 90 * 24 * time.Hour
 	maxLiveTokens  = 25
@@ -43,8 +43,8 @@ type Server struct {
 	// the real client address, e.g. CF-Connecting-IP. Empty trusts none,
 	// which is the only safe default -- any caller can send a header.
 	ClientIPHeader string
-	// RedirectAllow is the URL prefixes a sign-in may be handed off to:
-	// the consuming services' callback origins. Empty disables handoff.
+	// RedirectAllow is the callback URLs a sign-in may be handed off to;
+	// one ending in / allows any path under it. Empty disables handoff.
 	RedirectAllow []string
 	Logger        *slog.Logger
 	// Now is the clock, swapped in tests.
@@ -67,8 +67,11 @@ type pendingFlow struct {
 	accountID     string
 	redirectURI   string
 	codeChallenge string
-	tokenID       string
-	expires       time.Time
+	// tokenID is the credential that asked for a handoff code; parentID is
+	// the browser sign-in the token it becomes is linked to, or empty.
+	tokenID  string
+	parentID string
+	expires  time.Time
 }
 
 // routeKind says what a route is for, which decides what the contract owes
@@ -136,6 +139,7 @@ func (s *Server) routes() []route {
 		{"DELETE", "/v1/avatar", routeAPI, s.removeAvatar},
 		{"POST", "/v1/handoff", routeAPI, s.handoff},
 		{"POST", "/v1/exchange", routeAPI, s.exchange},
+		{"POST", "/v1/signout", routeAPI, s.signout},
 		{"GET", "/v1/tokens", routeAPI, s.listTokens},
 		{"POST", "/v1/tokens", routeAPI, s.mintToken},
 		{"DELETE", "/v1/tokens/{id}", routeAPI, s.revokeToken},

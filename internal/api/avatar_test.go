@@ -25,7 +25,7 @@ func profileCredential(t *testing.T, s *Server, provider_id string) (string, str
 	if err != nil {
 		t.Fatal(err)
 	}
-	credential, err := s.issue(httptest.NewRequest("GET", "/", nil), account, "test profile", "https://app.example.com")
+	credential, err := s.issue(httptest.NewRequest("GET", "/", nil), account, "test profile", "https://app.example.com", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestAvatarRejectsLargeFakeAndDamagedImages(t *testing.T) {
 func TestAvatarCookieWritesRequireSameOrigin(t *testing.T) {
 	_, s := newTestServer(t)
 	account, _ := s.Store.SignIn(context.Background(), "github", "1", "reader")
-	credential, _ := s.issue(httptest.NewRequest("GET", "/", nil), account, "browser", "")
+	credential, _ := s.issue(httptest.NewRequest("GET", "/", nil), account, "browser", "", "")
 	req := httptest.NewRequest("DELETE", "/v1/avatar", nil)
 	req.AddCookie(&http.Cookie{Name: s.sessionName(), Value: credential.Token})
 	w := httptest.NewRecorder()
@@ -212,7 +212,7 @@ func TestProviderAvatarPrioritySelectionAndFallback(t *testing.T) {
 	if selected == nil || selected.Source != "github" {
 		t.Fatalf("first linked provider was not the default: %+v", selected)
 	}
-	credential, _ := s.issue(httptest.NewRequest("GET", "/", nil), account, "profile", "https://app.example.com")
+	credential, _ := s.issue(httptest.NewRequest("GET", "/", nil), account, "profile", "https://app.example.com", "")
 	response := avatarRequest(s, "PUT", "/v1/avatar", credential.Token, "application/json", []byte(`{"source":"discord"}`), -1)
 	if response.Code != 204 {
 		t.Fatalf("select: %d %s", response.Code, response.Body.String())

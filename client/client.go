@@ -9,6 +9,10 @@
 //   - every whoami answer is checked against this service's own origin
 //     (token.audience) before it is trusted, and re-checked with identity
 //     every Recheck, so revoking at identity takes effect within minutes;
+//   - only identity saying no ends a session: when identity cannot be
+//     reached, a gate answers 503 and the cookie stays;
+//   - signing out here signs the browser out of identity, and so out of
+//     every service that sign-in reached;
 //   - what a group grants is this service's decision, made with who.In.
 //
 // Wire it up:
@@ -24,10 +28,14 @@
 //
 // and in a handler behind Require, client.WhoFrom(r.Context()) is the person.
 //
+// A page with its own sign-in button follows SilentSignInURL first, once per
+// browser session: a person already signed in at identity comes straight
+// back signed in here, and anybody else comes straight back signed out.
+//
 // There is no session table. The cookie holds the application token sealed
 // with AES-GCM under Key, so a leaked database reveals no sessions and a
-// rotated Key signs everyone out. The cost is that "sign out everywhere" is
-// done at identity, by revoking the tokens named for this service.
+// rotated Key signs everyone out. "Sign out of every device" is done at
+// identity, by revoking the sign-ins there.
 package client
 
 import (
@@ -48,6 +56,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/basicallysource/identity/api"
 )
@@ -219,6 +228,16 @@ func (a *Auth) SignInURL(dest string) string {
 	return "/auth/signin?dest=" + url.QueryEscape(localPath(dest))
 }
 
+// SilentSignInURL is SignInURL asking identity not to show anything: a
+// browser already signed in there comes back signed in, and any other comes
+// back to dest signed out. Following it marks the browser for the rest of
+// its session, however identity answers or fails to, so the page shows its
+// button instead of asking again. /auth/me offers this URL only while it is
+// worth following.
+func (a *Auth) SilentSignInURL(dest string) string {
+	return a.SignInURL(dest) + "&prompt=none"
+}
+
 func (a *Auth) callbackURL() string { return a.cfg.BaseURL + a.cfg.CallbackPath }
 
 // -- cookies -------------------------------------------------------------
@@ -266,9 +285,18 @@ type pending struct {
 	State    string `json:"s"`
 	Verifier string `json:"v"`
 	Dest     string `json:"d"`
+	// Silent is a prompt=none sign-in, the only kind that may come back
+	// without one.
+	Silent bool `json:"n,omitempty"`
 }
 
 func (a *Auth) signinCookie() string { return a.cfg.Cookie + "-signin" }
+
+// silentCookie marks a browser that is not to be signed in silently: a
+// silent sign-in was tried, however it ended, or the person signed out here.
+// A sign-in that comes back clears it. It has no lifetime, so it goes when
+// the browser session does.
+func (a *Auth) silentCookie() string { return a.cfg.Cookie + "-silent" }
 
 // -- the round trip ------------------------------------------------------
 
@@ -283,18 +311,27 @@ func (a *Auth) signin(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, http.StatusInternalServerError, "could not start sign-in")
 		return
 	}
-	sealed, err := a.seal(pending{State: state, Verifier: verifier, Dest: localPath(r.URL.Query().Get("dest"))})
+	silent := r.URL.Query().Get("prompt") == "none"
+	sealed, err := a.seal(pending{State: state, Verifier: verifier, Dest: localPath(r.URL.Query().Get("dest")), Silent: silent})
 	if err != nil {
 		a.fail(w, http.StatusInternalServerError, "could not start sign-in")
 		return
 	}
 	a.setCookie(w, a.signinCookie(), sealed, 10*time.Minute)
+	if silent {
+		// Marked now, not when identity answers: an identity that is down,
+		// or that shows its page instead, never sends the browser back.
+		a.setCookie(w, a.silentCookie(), "1", 0)
+	}
 
 	challenge := sha256.Sum256([]byte(verifier))
 	q := url.Values{
 		"redirect_uri":   {a.callbackURL()},
 		"state":          {state},
 		"code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])},
+	}
+	if silent {
+		q.Set("prompt", "none")
 	}
 	http.Redirect(w, r, a.cfg.IdentityURL+"/authorize?"+q.Encode(), http.StatusSeeOther)
 }
@@ -309,6 +346,12 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	a.setCookie(w, a.signinCookie(), "", 0)
 	if subtle.ConstantTimeCompare([]byte(p.State), []byte(r.URL.Query().Get("state"))) != 1 {
 		a.fail(w, http.StatusBadRequest, "this sign-in did not start here; start again")
+		return
+	}
+	if p.Silent && r.URL.Query().Get("error") == "login_required" {
+		// Nobody is signed in at identity. Back to where the person was
+		// going, signed out; the mark from signin keeps it from asking again.
+		http.Redirect(w, r, localPath(p.Dest), http.StatusSeeOther)
 		return
 	}
 	code := r.URL.Query().Get("code")
@@ -335,6 +378,11 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The token was minted; do not leave it live for nothing.
 		a.revoke(r.Context(), token)
+		if errors.Is(err, ErrUnavailable) {
+			a.cfg.Logger.Error("identity client: whoami after exchange", "error", err)
+			a.fail(w, http.StatusBadGateway, "sign-in is unavailable; try again")
+			return
+		}
 		a.cfg.Logger.Warn("identity client: refused a sign-in", "error", err)
 		a.fail(w, http.StatusForbidden, "that sign-in is not valid; start again")
 		return
@@ -350,32 +398,51 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.setCookie(w, a.cfg.Cookie, sealed, ttl)
+	if _, err := r.Cookie(a.silentCookie()); err == nil {
+		a.setCookie(w, a.silentCookie(), "", 0)
+	}
 	a.remember(token, who)
 	http.Redirect(w, r, localPath(p.Dest), http.StatusSeeOther)
 }
 
+// signout ends the sign-in at identity, then here. Identity being
+// unreachable does not keep anybody signed in here: the cookie goes and the
+// browser is marked so a silent sign-in cannot undo the sign-out.
 func (a *Auth) signout(w http.ResponseWriter, r *http.Request) {
 	if !a.sameOrigin(r) {
 		a.fail(w, http.StatusForbidden, "sign-out must come from this site")
 		return
 	}
 	if token, ok := a.token(r); ok {
-		a.revoke(r.Context(), token)
+		a.signOutAtIdentity(r.Context(), token)
 		a.forget(token)
 	}
 	a.setCookie(w, a.cfg.Cookie, "", 0)
+	a.setCookie(w, a.silentCookie(), "1", 0)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // me is the JSON a page's own script asks: who is signed in, if anyone,
 // and where to go if not. The shape is the one contract a frontend helper
-// in any language relies on.
+// in any language relies on. Signed out, "signin" is the button's link and
+// "silent_signin" is there only until this browser session has tried it or
+// signed out here: a page follows it, once, before showing the button. 503 means identity could not be asked, which is neither answer.
 func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
+	who, err := a.who(r)
+	if errors.Is(err, ErrUnavailable) {
+		a.cfg.Logger.Warn("identity client: whoami", "error", err)
+		a.fail(w, http.StatusServiceUnavailable, "sign-in is unavailable; try again shortly")
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	who, ok := a.Who(r)
-	if !ok {
-		json.NewEncoder(w).Encode(map[string]any{"signed_in": false, "signin": a.SignInURL(r.Referer())})
+	if err != nil {
+		dest := a.referrer(r)
+		out := map[string]any{"signed_in": false, "signin": a.SignInURL(dest)}
+		if _, err := r.Cookie(a.silentCookie()); err != nil {
+			out["silent_signin"] = a.SilentSignInURL(dest)
+		}
+		json.NewEncoder(w).Encode(out)
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{
@@ -390,24 +457,52 @@ func (a *Auth) me(w http.ResponseWriter, r *http.Request) {
 
 // -- who is asking -------------------------------------------------------
 
+// ErrSignedOut is identity saying no: the token is unknown, expired or
+// revoked, or was minted for another service.
+var ErrSignedOut = errors.New("identity client: not signed in")
+
+// ErrUnavailable is identity not answering: unreachable, or failing. It
+// says nothing about the token, so nobody is signed out over it.
+var ErrUnavailable = errors.New("identity client: identity is unavailable")
+
 // Who resolves the request's session to the person behind it, asking
 // identity at most once per Recheck per session. false means signed out,
-// expired, or revoked.
+// expired, or revoked, or that identity could not be asked; Require tells
+// those apart.
 func (a *Auth) Who(r *http.Request) (Who, bool) {
+	who, err := a.who(r)
+	return who, err == nil
+}
+
+func (a *Auth) who(r *http.Request) (Who, error) {
 	token, ok := a.token(r)
 	if !ok {
-		return Who{}, false
+		return Who{}, ErrSignedOut
+	}
+	return a.WhoToken(r.Context(), token)
+}
+
+// WhoToken is Who for a token that arrived some other way, such as a
+// script's bearer token: the same audience check, the same cache. The
+// token must have been handed off to this service. The error is
+// ErrSignedOut or ErrUnavailable, to be told apart with errors.Is: the
+// first is a 401, the second a 503.
+func (a *Auth) WhoToken(ctx context.Context, token string) (Who, error) {
+	if token == "" {
+		return Who{}, ErrSignedOut
 	}
 	if who, ok := a.recall(token); ok {
-		return who, true
+		return who, nil
 	}
-	who, err := a.whoami(r.Context(), token)
+	who, err := a.whoami(ctx, token)
 	if err != nil {
-		a.forget(token)
-		return Who{}, false
+		if errors.Is(err, ErrSignedOut) {
+			a.forget(token)
+		}
+		return Who{}, err
 	}
 	a.remember(token, who)
-	return who, true
+	return who, nil
 }
 
 func (a *Auth) token(r *http.Request) (string, bool) {
@@ -423,21 +518,25 @@ func (a *Auth) token(r *http.Request) (string, bool) {
 }
 
 // whoami asks identity and applies the one check every consumer must:
-// the token was minted for this service and no other.
+// the token was minted for this service and no other. Only a 401 or that
+// check failing is ErrSignedOut; any other failure is ErrUnavailable.
 func (a *Auth) whoami(ctx context.Context, token string) (Who, error) {
 	resp, err := a.api.WhoamiWithResponse(ctx, bearer(token))
 	if err != nil {
-		return Who{}, err
+		return Who{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	if resp.StatusCode() == http.StatusUnauthorized {
+		return Who{}, ErrSignedOut
 	}
 	if resp.JSON200 == nil {
-		return Who{}, fmt.Errorf("identity answered %d", resp.StatusCode())
+		return Who{}, fmt.Errorf("%w: identity answered %d", ErrUnavailable, resp.StatusCode())
 	}
 	me := resp.JSON200
 	if me.Token.Audience != a.cfg.BaseURL {
-		return Who{}, fmt.Errorf("token audience is %q, not this service", me.Token.Audience)
+		return Who{}, fmt.Errorf("%w: token audience is %q, not this service", ErrSignedOut, me.Token.Audience)
 	}
 	if me.Token.ExpiresAt != nil && me.Token.ExpiresAt.Before(time.Now()) {
-		return Who{}, errors.New("token expired")
+		return Who{}, fmt.Errorf("%w: token expired", ErrSignedOut)
 	}
 	who := Who{Account: string(me.Account), Handle: me.Handle, Groups: []string{}, TokenID: me.Token.Id}
 	for _, g := range me.Groups {
@@ -455,12 +554,33 @@ func (a *Auth) whoami(ctx context.Context, token string) (Who, error) {
 	return who, nil
 }
 
+// revoke kills one token and nothing else, for a sign-in refused here or a
+// sign-out identity would not do.
 func (a *Auth) revoke(ctx context.Context, token string) {
 	resp, err := a.api.WhoamiWithResponse(ctx, bearer(token))
 	if err != nil || resp.JSON200 == nil {
 		return
 	}
 	a.api.RevokeTokenWithResponse(ctx, resp.JSON200.Token.Id, bearer(token))
+}
+
+// signOutAtIdentity ends the identity sign-in this token was handed off
+// from, which ends every token it handed off. An identity that refuses, as
+// one from before /v1/signout does, still ends this service's own token. A
+// failure is logged and otherwise ignored: the person asked to be signed out
+// here, and is.
+func (a *Auth) signOutAtIdentity(ctx context.Context, token string) {
+	resp, err := a.api.SignOutWithResponse(ctx, bearer(token))
+	if err != nil {
+		a.cfg.Logger.Warn("identity client: sign out at identity", "error", err)
+		return
+	}
+	// 401 is a token identity had already let go of, which is the goal.
+	if resp.StatusCode() == http.StatusNoContent || resp.StatusCode() == http.StatusUnauthorized {
+		return
+	}
+	a.cfg.Logger.Warn("identity client: sign out at identity", "status", resp.StatusCode())
+	a.revoke(ctx, token)
 }
 
 func bearer(token string) api.RequestEditorFn {
@@ -519,11 +639,19 @@ func WhoFrom(ctx context.Context) (Who, bool) {
 
 // Require lets only signed-in people through, and puts them in the
 // context. A browser asking for a page is sent to sign in and brought back;
-// anything else gets 401.
+// anything else gets 401. When identity cannot be asked, everybody gets 503
+// and keeps their session.
 func (a *Auth) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		who, ok := a.Who(r)
-		if !ok {
+		who, err := a.who(r)
+		if errors.Is(err, ErrUnavailable) {
+			// Not knowing is not a no. Keep the session, and do not send the
+			// browser off to mint another token for the same person.
+			a.cfg.Logger.Warn("identity client: whoami", "error", err)
+			a.fail(w, http.StatusServiceUnavailable, "sign-in is unavailable; try again shortly")
+			return
+		}
+		if err != nil {
 			if _, err := r.Cookie(a.cfg.Cookie); err == nil {
 				a.setCookie(w, a.cfg.Cookie, "", 0)
 			}
@@ -567,11 +695,32 @@ func (a *Auth) fail(w http.ResponseWriter, status int, message string) {
 	fmt.Fprintln(w, message)
 }
 
-// localPath keeps a destination on this service: a path, never a URL, so a
-// sign-in cannot be used to bounce a browser somewhere else.
-func localPath(dest string) string {
-	if dest == "" || !strings.HasPrefix(dest, "/") || strings.HasPrefix(dest, "//") || strings.HasPrefix(dest, "/\\") {
+// referrer is the page on this service a script's request came from, so
+// /auth/me can bring the person back to it.
+func (a *Auth) referrer(r *http.Request) string {
+	ref, err := url.Parse(r.Referer())
+	if err != nil || ref.Scheme+"://"+ref.Host != a.cfg.BaseURL {
 		return "/"
+	}
+	return ref.RequestURI()
+}
+
+// localPath keeps a destination on this service: a path, never a URL, so a
+// sign-in cannot be used to bounce a browser somewhere else. What a browser
+// could read as another host is refused, not repaired: a scheme or a host,
+// a leading //, a backslash anywhere (browsers take it for a slash), and
+// control characters, which browsers strip, so /<tab>/evil.example would
+// arrive as //evil.example. The path is checked again decoded, for whatever
+// decodes it once more on the way.
+func localPath(dest string) string {
+	parsed, err := url.Parse(dest)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil {
+		return "/"
+	}
+	for _, s := range []string{dest, parsed.Path} {
+		if !strings.HasPrefix(s, "/") || strings.HasPrefix(s, "//") || strings.Contains(s, "\\") || strings.ContainsFunc(s, unicode.IsControl) {
+			return "/"
+		}
 	}
 	return dest
 }

@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"github.com/basicallysource/identity/internal/token"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -148,4 +150,121 @@ func TestPKCEAndRevokedHandoff(t *testing.T) {
 	if response.StatusCode != 200 {
 		t.Fatal("revoked cookie prevents a fresh sign-in")
 	}
+}
+
+// The login CSRF this closes: the GitHub poll signs a browser in without a
+// cookie, and the Origin check used to run only when one was present, so a
+// foreign page could post a device code its author had approved and sign
+// its visitor in to the author's account. Every page write now needs this
+// service's Origin, cookie or not.
+func TestPageWritesNeedTheOriginWithoutACookie(t *testing.T) {
+	ts, _ := newTestServer(t)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	// The fake GitHub has already approved dev-1: the attacker's own code.
+	approved := url.Values{"device_code": {"dev-1"}, "user_code": {"ABCD-1234"}, "interval": {"1"}}.Encode()
+	for _, origin := range []string{"https://evil.example", ""} {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/ui/signin/github/poll", strings.NewReader(approved))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || len(resp.Cookies()) != 0 {
+			t.Fatalf("a cookieless poll from origin %q answered %d with cookies %v", origin, resp.StatusCode, resp.Cookies())
+		}
+	}
+
+	// The rest of the page's signed-out writes are refused the same way.
+	for _, path := range []string{"/ui/signin/github", "/ui/signin/discord", "/ui/signout", "/session/logout"} {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+path, nil)
+		req.Header.Set("Origin", "https://evil.example")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || len(resp.Cookies()) != 0 {
+			t.Errorf("a cookieless %s from another origin answered %d with cookies %v", path, resp.StatusCode, resp.Cookies())
+		}
+	}
+
+	// From the page itself the same poll signs in.
+	b := newBrowser(t, ts)
+	b.signInViaPage()
+
+	// The page's plain form posts (sign out, Discord) work in a browser only
+	// with these headers. Under no-referrer a browser sends Origin: null on
+	// them, and without Discord in form-action it refuses the redirect there.
+	_, _, header := b.page(http.MethodGet, "/", nil)
+	if got := header.Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("Referrer-Policy is %q; the page's form posts would be refused", got)
+	}
+	if got := header.Get("Content-Security-Policy"); !strings.HasSuffix(got, "; form-action 'self' https://discord.com") {
+		t.Fatalf("Content-Security-Policy %q does not let the Discord form reach Discord", got)
+	}
+}
+
+// On https the cookies that steer a sign-in are __Host- cookies, which only
+// this exact host can set. A sibling subdomain can still plant the plain
+// names, so those are never read.
+func TestSignInCookiesAreHostOnlyOnHTTPS(t *testing.T) {
+	_, server := newTestServer(t)
+	server.BaseURL = "https://identity.example"
+	server.RedirectAllow = []string{"https://app.example/auth/callback"}
+	handler := server.Handler()
+	serve := func(req *http.Request) *http.Response {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w.Result()
+	}
+	hostOnly := func(c *http.Cookie, name string) {
+		t.Helper()
+		if c.Name != name || c.Path != "/" || !c.Secure || c.Domain != "" || !c.HttpOnly {
+			t.Fatalf("cookie %+v is not a valid %s", c, name)
+		}
+	}
+
+	resp := serve(httptest.NewRequest(http.MethodGet, "/authorize?redirect_uri=https%3A%2F%2Fapp.example%2Fauth%2Fcallback&state=s", nil))
+	if len(resp.Cookies()) != 1 {
+		t.Fatalf("authorize set %v", resp.Cookies())
+	}
+	kept := resp.Cookies()[0]
+	hostOnly(kept, "__Host-identity_authorize")
+	planted := httptest.NewRequest(http.MethodGet, "/", nil)
+	planted.AddCookie(&http.Cookie{Name: "identity_authorize", Value: kept.Value})
+	if server.readAuthorize(planted) != nil {
+		t.Fatal("a plain-named authorize cookie was read")
+	}
+	planted.AddCookie(kept)
+	if server.readAuthorize(planted) == nil {
+		t.Fatal("the __Host- authorize cookie was not read")
+	}
+
+	resp = serve(httptest.NewRequest(http.MethodPost, "/signin/discord/start", nil))
+	if resp.StatusCode != http.StatusOK || len(resp.Cookies()) != 1 {
+		t.Fatalf("discord start: %d %v", resp.StatusCode, resp.Cookies())
+	}
+	state := resp.Cookies()[0]
+	hostOnly(state, "__Host-identity_state")
+	callback := "/signin/discord/callback?code=any&state=" + url.QueryEscape(state.Value)
+
+	req := httptest.NewRequest(http.MethodGet, callback, nil)
+	req.AddCookie(&http.Cookie{Name: "identity_state", Value: state.Value})
+	resp = serve(req)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "did not start here") {
+		t.Fatalf("a plain-named state cookie finished a sign-in: %d", resp.StatusCode)
+	}
+	req = httptest.NewRequest(http.MethodGet, callback, nil)
+	req.AddCookie(state)
+	resp = serve(req)
+	if resp.StatusCode != http.StatusSeeOther || len(resp.Cookies()) != 1 {
+		t.Fatalf("the __Host- state cookie did not finish the sign-in: %d %v", resp.StatusCode, resp.Cookies())
+	}
+	hostOnly(resp.Cookies()[0], "__Host-identity")
 }

@@ -521,9 +521,10 @@ type ClientInterface interface {
 
 	// Logout End the browser session at this service.
 	//
-	// Revokes the account token behind the session cookie and clears the
-	// cookie. Answers 204 even with no session. A cookie-authenticated
-	// request must carry this service's own Origin.
+	// Revokes the account token behind the session cookie, and every
+	// application token minted from that sign-in, and clears the cookie.
+	// Answers 204 even with no session. The request must carry this
+	// service's own Origin.
 	//
 	// Corresponds with POST /session/logout (the `Logout` operationId).
 	Logout(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -612,6 +613,10 @@ type ClientInterface interface {
 	// Called server-side by the service behind the callback. The redirect
 	// must match the one the code was minted for, and the verifier must
 	// match the challenge if one was given. Any attempt consumes the code.
+	// A code the page minted for a signed-in browser becomes a token linked
+	// to that sign-in, and replaces the token that sign-in last got for the
+	// same application. A code minted through `POST /v1/handoff` becomes a
+	// token that stands alone.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -623,6 +628,10 @@ type ClientInterface interface {
 	// Called server-side by the service behind the callback. The redirect
 	// must match the one the code was minted for, and the verifier must
 	// match the challenge if one was given. Any attempt consumes the code.
+	// A code the page minted for a signed-in browser becomes a token linked
+	// to that sign-in, and replaces the token that sign-in last got for the
+	// same application. A code minted through `POST /v1/handoff` becomes a
+	// token that stands alone.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -675,9 +684,12 @@ type ClientInterface interface {
 
 	// HandoffWithBody Mint a one-time code for a consuming service's callback.
 	//
-	// Called by this service's own page on behalf of the signed-in person.
-	// The destination must be on the redirect allowlist. An optional S256
-	// PKCE challenge binds the code to the verifier the service holds.
+	// Called with a bearer account token, to make a credential for a service
+	// outside a browser. The destination must be on the redirect allowlist.
+	// An optional S256 PKCE challenge binds the code to the verifier the
+	// service holds. The token the code becomes is linked to no sign-in, so
+	// nothing a browser does revokes it. This service's own page mints the
+	// codes it hands to browsers itself.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -686,14 +698,28 @@ type ClientInterface interface {
 
 	// Handoff Mint a one-time code for a consuming service's callback.
 	//
-	// Called by this service's own page on behalf of the signed-in person.
-	// The destination must be on the redirect allowlist. An optional S256
-	// PKCE challenge binds the code to the verifier the service holds.
+	// Called with a bearer account token, to make a credential for a service
+	// outside a browser. The destination must be on the redirect allowlist.
+	// An optional S256 PKCE challenge binds the code to the verifier the
+	// service holds. The token the code becomes is linked to no sign-in, so
+	// nothing a browser does revokes it. This service's own page mints the
+	// codes it hands to browsers itself.
 	//
 	// Takes a body of the `application/json` content type.
 	//
 	// Corresponds with POST /v1/handoff (the `Handoff` operationId).
 	Handoff(ctx context.Context, body HandoffJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SignOut Sign a browser out here and at every application it signed in to.
+	//
+	// Called server-side by an application, with the application token of
+	// the session it is ending. When that token was minted for a browser
+	// signed in here, the sign-in is revoked, and with it every application
+	// token minted from it, this one included. Any other token is revoked
+	// alone, with anything minted from it. Answers 204 either way.
+	//
+	// Corresponds with POST /v1/signout (the `SignOut` operationId).
+	SignOut(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTokens The caller's live and recently revoked tokens.
 	//
@@ -702,12 +728,18 @@ type ClientInterface interface {
 
 	// MintTokenWithBody Mint a named account token.
 	//
+	// At most 25 account tokens are live at once; application tokens do not
+	// count toward it.
+	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /v1/tokens (the `MintToken` operationId).
 	MintTokenWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// MintToken Mint a named account token.
+	//
+	// At most 25 account tokens are live at once; application tokens do not
+	// count toward it.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -716,7 +748,8 @@ type ClientInterface interface {
 
 	// RevokeToken Revoke one of the caller's tokens.
 	//
-	// An application token may revoke only itself.
+	// Revoking a token revokes every application token minted from it. An
+	// application token may revoke only itself.
 	//
 	// Corresponds with DELETE /v1/tokens/{id} (the `RevokeToken` operationId).
 	RevokeToken(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -763,9 +796,10 @@ func (c *Client) Providers(ctx context.Context, reqEditors ...RequestEditorFn) (
 
 // Logout End the browser session at this service.
 //
-// Revokes the account token behind the session cookie and clears the
-// cookie. Answers 204 even with no session. A cookie-authenticated
-// request must carry this service's own Origin.
+// Revokes the account token behind the session cookie, and every
+// application token minted from that sign-in, and clears the cookie.
+// Answers 204 even with no session. The request must carry this
+// service's own Origin.
 //
 // Corresponds with POST /session/logout (the `Logout` operationId).
 func (c *Client) Logout(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -974,6 +1008,10 @@ func (c *Client) SelectAvatar(ctx context.Context, body SelectAvatarJSONRequestB
 // Called server-side by the service behind the callback. The redirect
 // must match the one the code was minted for, and the verifier must
 // match the challenge if one was given. Any attempt consumes the code.
+// A code the page minted for a signed-in browser becomes a token linked
+// to that sign-in, and replaces the token that sign-in last got for the
+// same application. A code minted through `POST /v1/handoff` becomes a
+// token that stands alone.
 //
 // Takes any type of body and a specified content type.
 //
@@ -995,6 +1033,10 @@ func (c *Client) ExchangeWithBody(ctx context.Context, contentType string, body 
 // Called server-side by the service behind the callback. The redirect
 // must match the one the code was minted for, and the verifier must
 // match the challenge if one was given. Any attempt consumes the code.
+// A code the page minted for a signed-in browser becomes a token linked
+// to that sign-in, and replaces the token that sign-in last got for the
+// same application. A code minted through `POST /v1/handoff` becomes a
+// token that stands alone.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -1137,9 +1179,12 @@ func (c *Client) AddMember(ctx context.Context, name GroupName, account AccountI
 
 // HandoffWithBody Mint a one-time code for a consuming service's callback.
 //
-// Called by this service's own page on behalf of the signed-in person.
-// The destination must be on the redirect allowlist. An optional S256
-// PKCE challenge binds the code to the verifier the service holds.
+// Called with a bearer account token, to make a credential for a service
+// outside a browser. The destination must be on the redirect allowlist.
+// An optional S256 PKCE challenge binds the code to the verifier the
+// service holds. The token the code becomes is linked to no sign-in, so
+// nothing a browser does revokes it. This service's own page mints the
+// codes it hands to browsers itself.
 //
 // Takes any type of body and a specified content type.
 //
@@ -1158,15 +1203,39 @@ func (c *Client) HandoffWithBody(ctx context.Context, contentType string, body i
 
 // Handoff Mint a one-time code for a consuming service's callback.
 //
-// Called by this service's own page on behalf of the signed-in person.
-// The destination must be on the redirect allowlist. An optional S256
-// PKCE challenge binds the code to the verifier the service holds.
+// Called with a bearer account token, to make a credential for a service
+// outside a browser. The destination must be on the redirect allowlist.
+// An optional S256 PKCE challenge binds the code to the verifier the
+// service holds. The token the code becomes is linked to no sign-in, so
+// nothing a browser does revokes it. This service's own page mints the
+// codes it hands to browsers itself.
 //
 // Takes a body of the `application/json` content type.
 //
 // Corresponds with POST /v1/handoff (the `Handoff` operationId).
 func (c *Client) Handoff(ctx context.Context, body HandoffJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewHandoffRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// SignOut Sign a browser out here and at every application it signed in to.
+//
+// Called server-side by an application, with the application token of
+// the session it is ending. When that token was minted for a browser
+// signed in here, the sign-in is revoked, and with it every application
+// token minted from it, this one included. Any other token is revoked
+// alone, with anything minted from it. Answers 204 either way.
+//
+// Corresponds with POST /v1/signout (the `SignOut` operationId).
+func (c *Client) SignOut(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSignOutRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -1194,6 +1263,9 @@ func (c *Client) ListTokens(ctx context.Context, reqEditors ...RequestEditorFn) 
 
 // MintTokenWithBody Mint a named account token.
 //
+// At most 25 account tokens are live at once; application tokens do not
+// count toward it.
+//
 // Takes any type of body and a specified content type.
 //
 // Corresponds with POST /v1/tokens (the `MintToken` operationId).
@@ -1210,6 +1282,9 @@ func (c *Client) MintTokenWithBody(ctx context.Context, contentType string, body
 }
 
 // MintToken Mint a named account token.
+//
+// At most 25 account tokens are live at once; application tokens do not
+// count toward it.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -1228,7 +1303,8 @@ func (c *Client) MintToken(ctx context.Context, body MintTokenJSONRequestBody, r
 
 // RevokeToken Revoke one of the caller's tokens.
 //
-// An application token may revoke only itself.
+// Revoking a token revokes every application token minted from it. An
+// application token may revoke only itself.
 //
 // Corresponds with DELETE /v1/tokens/{id} (the `RevokeToken` operationId).
 func (c *Client) RevokeToken(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -2106,6 +2182,33 @@ func NewHandoffRequestWithBody(server string, contentType string, body io.Reader
 	return req, nil
 }
 
+// NewSignOutRequest constructs an http.Request for the SignOut method
+func NewSignOutRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/signout")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListTokensRequest constructs an http.Request for the ListTokens method
 func NewListTokensRequest(server string) (*http.Request, error) {
 	var err error
@@ -2294,9 +2397,10 @@ type ClientWithResponsesInterface interface {
 
 	// LogoutWithResponse End the browser session at this service.
 	//
-	// Revokes the account token behind the session cookie and clears the
-	// cookie. Answers 204 even with no session. A cookie-authenticated
-	// request must carry this service's own Origin.
+	// Revokes the account token behind the session cookie, and every
+	// application token minted from that sign-in, and clears the cookie.
+	// Answers 204 even with no session. The request must carry this
+	// service's own Origin.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -2399,6 +2503,10 @@ type ClientWithResponsesInterface interface {
 	// Called server-side by the service behind the callback. The redirect
 	// must match the one the code was minted for, and the verifier must
 	// match the challenge if one was given. Any attempt consumes the code.
+	// A code the page minted for a signed-in browser becomes a token linked
+	// to that sign-in, and replaces the token that sign-in last got for the
+	// same application. A code minted through `POST /v1/handoff` becomes a
+	// token that stands alone.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -2410,6 +2518,10 @@ type ClientWithResponsesInterface interface {
 	// Called server-side by the service behind the callback. The redirect
 	// must match the one the code was minted for, and the verifier must
 	// match the challenge if one was given. Any attempt consumes the code.
+	// A code the page minted for a signed-in browser becomes a token linked
+	// to that sign-in, and replaces the token that sign-in last got for the
+	// same application. A code minted through `POST /v1/handoff` becomes a
+	// token that stands alone.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -2474,9 +2586,12 @@ type ClientWithResponsesInterface interface {
 
 	// HandoffWithBodyWithResponse Mint a one-time code for a consuming service's callback.
 	//
-	// Called by this service's own page on behalf of the signed-in person.
-	// The destination must be on the redirect allowlist. An optional S256
-	// PKCE challenge binds the code to the verifier the service holds.
+	// Called with a bearer account token, to make a credential for a service
+	// outside a browser. The destination must be on the redirect allowlist.
+	// An optional S256 PKCE challenge binds the code to the verifier the
+	// service holds. The token the code becomes is linked to no sign-in, so
+	// nothing a browser does revokes it. This service's own page mints the
+	// codes it hands to browsers itself.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -2485,14 +2600,30 @@ type ClientWithResponsesInterface interface {
 
 	// HandoffWithResponse Mint a one-time code for a consuming service's callback.
 	//
-	// Called by this service's own page on behalf of the signed-in person.
-	// The destination must be on the redirect allowlist. An optional S256
-	// PKCE challenge binds the code to the verifier the service holds.
+	// Called with a bearer account token, to make a credential for a service
+	// outside a browser. The destination must be on the redirect allowlist.
+	// An optional S256 PKCE challenge binds the code to the verifier the
+	// service holds. The token the code becomes is linked to no sign-in, so
+	// nothing a browser does revokes it. This service's own page mints the
+	// codes it hands to browsers itself.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /v1/handoff (the `Handoff` operationId).
 	HandoffWithResponse(ctx context.Context, body HandoffJSONRequestBody, reqEditors ...RequestEditorFn) (*HandoffResponse, error)
+
+	// SignOutWithResponse Sign a browser out here and at every application it signed in to.
+	//
+	// Called server-side by an application, with the application token of
+	// the session it is ending. When that token was minted for a browser
+	// signed in here, the sign-in is revoked, and with it every application
+	// token minted from it, this one included. Any other token is revoked
+	// alone, with anything minted from it. Answers 204 either way.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/signout (the `SignOut` operationId).
+	SignOutWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*SignOutResponse, error)
 
 	// ListTokensWithResponse The caller's live and recently revoked tokens.
 	//
@@ -2503,12 +2634,18 @@ type ClientWithResponsesInterface interface {
 
 	// MintTokenWithBodyWithResponse Mint a named account token.
 	//
+	// At most 25 account tokens are live at once; application tokens do not
+	// count toward it.
+	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /v1/tokens (the `MintToken` operationId).
 	MintTokenWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*MintTokenResponse, error)
 
 	// MintTokenWithResponse Mint a named account token.
+	//
+	// At most 25 account tokens are live at once; application tokens do not
+	// count toward it.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -2517,7 +2654,8 @@ type ClientWithResponsesInterface interface {
 
 	// RevokeTokenWithResponse Revoke one of the caller's tokens.
 	//
-	// An application token may revoke only itself.
+	// Revoking a token revokes every application token minted from it. An
+	// application token may revoke only itself.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -3884,6 +4022,61 @@ func (r HandoffResponse) ContentType() string {
 	return ""
 }
 
+type SignOutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON401 the response for an HTTP 401 `application/json` response
+	JSON401 *Unauthorized
+	// JSON403 the response for an HTTP 403 `application/json` response
+	JSON403 *Forbidden
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *Failure
+}
+
+// GetJSON401 returns the response for an HTTP 401 `application/json` response
+func (r SignOutResponse) GetJSON401() *Unauthorized {
+	return r.JSON401
+}
+
+// GetJSON403 returns the response for an HTTP 403 `application/json` response
+func (r SignOutResponse) GetJSON403() *Forbidden {
+	return r.JSON403
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r SignOutResponse) GetJSON500() *Failure {
+	return r.JSON500
+}
+
+// GetBody returns the raw response body bytes
+func (r SignOutResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r SignOutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SignOutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SignOutResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ListTokensResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -4150,9 +4343,10 @@ func (c *ClientWithResponses) ProvidersWithResponse(ctx context.Context, reqEdit
 
 // LogoutWithResponse End the browser session at this service.
 //
-// Revokes the account token behind the session cookie and clears the
-// cookie. Answers 204 even with no session. A cookie-authenticated
-// request must carry this service's own Origin.
+// Revokes the account token behind the session cookie, and every
+// application token minted from that sign-in, and clears the cookie.
+// Answers 204 even with no session. The request must carry this
+// service's own Origin.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -4327,6 +4521,10 @@ func (c *ClientWithResponses) SelectAvatarWithResponse(ctx context.Context, body
 // Called server-side by the service behind the callback. The redirect
 // must match the one the code was minted for, and the verifier must
 // match the challenge if one was given. Any attempt consumes the code.
+// A code the page minted for a signed-in browser becomes a token linked
+// to that sign-in, and replaces the token that sign-in last got for the
+// same application. A code minted through `POST /v1/handoff` becomes a
+// token that stands alone.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -4344,6 +4542,10 @@ func (c *ClientWithResponses) ExchangeWithBodyWithResponse(ctx context.Context, 
 // Called server-side by the service behind the callback. The redirect
 // must match the one the code was minted for, and the verifier must
 // match the challenge if one was given. Any attempt consumes the code.
+// A code the page minted for a signed-in browser becomes a token linked
+// to that sign-in, and replaces the token that sign-in last got for the
+// same application. A code minted through `POST /v1/handoff` becomes a
+// token that stands alone.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -4462,9 +4664,12 @@ func (c *ClientWithResponses) AddMemberWithResponse(ctx context.Context, name Gr
 
 // HandoffWithBodyWithResponse Mint a one-time code for a consuming service's callback.
 //
-// Called by this service's own page on behalf of the signed-in person.
-// The destination must be on the redirect allowlist. An optional S256
-// PKCE challenge binds the code to the verifier the service holds.
+// Called with a bearer account token, to make a credential for a service
+// outside a browser. The destination must be on the redirect allowlist.
+// An optional S256 PKCE challenge binds the code to the verifier the
+// service holds. The token the code becomes is linked to no sign-in, so
+// nothing a browser does revokes it. This service's own page mints the
+// codes it hands to browsers itself.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -4479,9 +4684,12 @@ func (c *ClientWithResponses) HandoffWithBodyWithResponse(ctx context.Context, c
 
 // HandoffWithResponse Mint a one-time code for a consuming service's callback.
 //
-// Called by this service's own page on behalf of the signed-in person.
-// The destination must be on the redirect allowlist. An optional S256
-// PKCE challenge binds the code to the verifier the service holds.
+// Called with a bearer account token, to make a credential for a service
+// outside a browser. The destination must be on the redirect allowlist.
+// An optional S256 PKCE challenge binds the code to the verifier the
+// service holds. The token the code becomes is linked to no sign-in, so
+// nothing a browser does revokes it. This service's own page mints the
+// codes it hands to browsers itself.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -4492,6 +4700,25 @@ func (c *ClientWithResponses) HandoffWithResponse(ctx context.Context, body Hand
 		return nil, err
 	}
 	return ParseHandoffResponse(rsp)
+}
+
+// SignOutWithResponse Sign a browser out here and at every application it signed in to.
+//
+// Called server-side by an application, with the application token of
+// the session it is ending. When that token was minted for a browser
+// signed in here, the sign-in is revoked, and with it every application
+// token minted from it, this one included. Any other token is revoked
+// alone, with anything minted from it. Answers 204 either way.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/signout (the `SignOut` operationId).
+func (c *ClientWithResponses) SignOutWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*SignOutResponse, error) {
+	rsp, err := c.SignOut(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSignOutResponse(rsp)
 }
 
 // ListTokensWithResponse The caller's live and recently revoked tokens.
@@ -4509,6 +4736,9 @@ func (c *ClientWithResponses) ListTokensWithResponse(ctx context.Context, reqEdi
 
 // MintTokenWithBodyWithResponse Mint a named account token.
 //
+// At most 25 account tokens are live at once; application tokens do not
+// count toward it.
+//
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /v1/tokens (the `MintToken` operationId).
@@ -4521,6 +4751,9 @@ func (c *ClientWithResponses) MintTokenWithBodyWithResponse(ctx context.Context,
 }
 
 // MintTokenWithResponse Mint a named account token.
+//
+// At most 25 account tokens are live at once; application tokens do not
+// count toward it.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -4535,7 +4768,8 @@ func (c *ClientWithResponses) MintTokenWithResponse(ctx context.Context, body Mi
 
 // RevokeTokenWithResponse Revoke one of the caller's tokens.
 //
-// An application token may revoke only itself.
+// Revoking a token revokes every application token minted from it. An
+// application token may revoke only itself.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -5585,6 +5819,49 @@ func ParseHandoffResponse(rsp *http.Response) (*HandoffResponse, error) {
 			return nil, err
 		}
 		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Forbidden
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest Failure
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSignOutResponse parses an HTTP response from a SignOutWithResponse call
+func ParseSignOutResponse(rsp *http.Response) (*SignOutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SignOutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case rsp.StatusCode == 204:
+		break // No content-type
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest Unauthorized

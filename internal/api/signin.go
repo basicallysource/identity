@@ -23,6 +23,9 @@ import (
 
 const signInBodyLimit = 4 << 10
 
+// stateCookie ties a Discord callback to the browser that started the flow.
+const stateCookie = "identity_state"
+
 type tokenResponse struct {
 	Token     string     `json:"token"`
 	Account   string     `json:"account"`
@@ -132,15 +135,16 @@ func (s *Server) beginDiscord(w http.ResponseWriter, r *http.Request) (string, *
 	s.remember("state:"+state, linkTo)
 
 	// The cookie ties the callback to the browser that started the flow;
-	// the server-side entry ties it to this service. Both must agree.
+	// the server-side entry ties it to this service. Both must agree. Its
+	// path is / because the __Host- prefix allows no other.
 	http.SetCookie(w, &http.Cookie{
-		Name:     "identity_state",
+		Name:     s.cookieName(stateCookie),
 		Value:    state,
-		Path:     "/signin/discord",
+		Path:     "/",
 		MaxAge:   int(pendingFlowTTL / time.Second),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   strings.HasPrefix(s.BaseURL, "https://"),
+		Secure:   s.https(),
 	})
 	return s.Discord.Authorize(state, s.discordRedirect()), nil
 }
@@ -199,7 +203,7 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
-	cookie, err := r.Cookie("identity_state")
+	cookie, err := r.Cookie(s.cookieName(stateCookie))
 	if state == "" || code == "" || err != nil || cookie.Value != state {
 		s.callbackPage(w, callbackView{Error: "this sign-in did not start here; start again"})
 		return
@@ -231,7 +235,7 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 		s.callbackPage(w, callbackView{Error: fail.message})
 		return
 	}
-	minted, err := s.issue(r, account, "", "")
+	minted, err := s.issue(r, account, "", "", "")
 	if err != nil {
 		s.callbackPage(w, callbackView{Error: "could not issue a token: " + err.Error()})
 		return
@@ -278,7 +282,7 @@ func (s *Server) finishSignIn(w http.ResponseWriter, r *http.Request, providerNa
 		fail.write(w)
 		return
 	}
-	minted, err := s.issue(r, account, "", "")
+	minted, err := s.issue(r, account, "", "", "")
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
@@ -304,20 +308,25 @@ func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, accountID, p
 }
 
 // issue mints a token for an account, within policy. An empty name gets the
-// sign-in default.
-func (s *Server) issue(r *http.Request, account store.Account, name, audience string) (tokenResponse, error) {
+// sign-in default. An account token (no audience) counts against the cap. An
+// application token with a parent, the browser sign-in it was minted from,
+// replaces the token that sign-in last got for the same audience, which is
+// what bounds those instead.
+func (s *Server) issue(r *http.Request, account store.Account, name, audience, parent string) (tokenResponse, error) {
 	now := s.now()
 	if name == "" {
 		name = "sign-in " + now.Format("2006-01-02")
 	}
 
-	live, err := s.Store.LiveTokenCount(r.Context(), account.ID, now)
-	if err != nil {
-		s.logger().Error("sign-in: count tokens", "error", err)
-		return tokenResponse{}, errors.New("could not issue a token")
-	}
-	if live >= maxLiveTokens {
-		return tokenResponse{}, errors.New("this account has too many live tokens; revoke some first")
+	if audience == "" {
+		live, err := s.Store.LiveAccountTokenCount(r.Context(), account.ID, now)
+		if err != nil {
+			s.logger().Error("sign-in: count tokens", "error", err)
+			return tokenResponse{}, errors.New("could not issue a token")
+		}
+		if live >= maxLiveTokens {
+			return tokenResponse{}, errors.New("this account has too many live tokens; revoke some first")
+		}
 	}
 
 	minted, id, secretHash, err := token.New()
@@ -327,12 +336,17 @@ func (s *Server) issue(r *http.Request, account store.Account, name, audience st
 	}
 	expires := now.Add(tokenLifetime)
 
-	if err := s.Store.InsertToken(r.Context(), store.Token{
+	insert := s.Store.InsertToken
+	if parent != "" {
+		insert = s.Store.ReplaceToken
+	}
+	if err := insert(r.Context(), store.Token{
 		ID:         id,
 		SecretHash: secretHash,
 		AccountID:  account.ID,
 		Name:       name,
 		Audience:   audience,
+		ParentID:   parent,
 		CreatedAt:  now,
 		ExpiresAt:  expires,
 	}); err != nil {

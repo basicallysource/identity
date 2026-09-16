@@ -45,6 +45,13 @@ so a revocation or a group change lands within that window.
 The service's callback URL (`BaseURL` + `/auth/callback`) must be in
 `IDENTITY_REDIRECT_ALLOW`.
 
+One sign-in carries across every service. A browser already signed in here
+is sent straight back with a code, and a page that shows its own sign-in
+button can ask first with `prompt=none`, which comes back with
+`error=login_required` instead of showing anything. Signing out of any
+service signs that browser out here and out of every service its sign-in
+reached; the client package does both.
+
 ## Groups
 
 The one thing this service says about authorization: which accounts are in
@@ -90,13 +97,18 @@ Accept a bearer token, forward it:
 must check `token.audience` against its own origin before trusting the
 answer; the client package does this for you.
 
+To sign a person out, send their token to `POST /v1/signout`. It revokes the
+browser sign-in the token was handed off from, and every token minted from
+that sign-in, this one included.
+
 ## How a person signs in
 
 The page at `/` does it: sign in with GitHub (device flow, works from a
 terminal too) or Discord (redirect), link the other provider, choose a
 profile photo, mint and revoke tokens, and, for `identity-admin`, manage
 groups. It is server-rendered HTML with htmx; there is no token in the
-browser.
+browser. Signing out here, or revoking a browser's session from the token
+list, signs that browser out of every service it reached from it.
 
 Either sign-in flow started **with** a bearer token links the newly proved
 identity to that account instead. An identity already proving a different

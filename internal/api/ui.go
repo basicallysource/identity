@@ -29,6 +29,7 @@ import (
 
 // authorizeCookie carries a consuming service's authorize request across
 // the sign-in it triggered, so the person lands back where they were going.
+// On https it is a __Host- cookie; see cookieName.
 const authorizeCookie = "identity_authorize"
 
 // authorizeRequest is what a consuming service sends the browser here with.
@@ -144,7 +145,7 @@ func (s *Server) fillGroups(r *http.Request, v *view) error {
 }
 
 func (s *Server) readAuthorize(r *http.Request) *authorizeRequest {
-	c, err := r.Cookie(authorizeCookie)
+	c, err := r.Cookie(s.cookieName(authorizeCookie))
 	if err != nil || c.Value == "" {
 		return nil
 	}
@@ -165,15 +166,19 @@ func (s *Server) setAuthorize(w http.ResponseWriter, a *authorizeRequest) {
 		raw, _ := json.Marshal(a)
 		value, maxAge = url.QueryEscape(string(raw)), 600
 	}
-	http.SetCookie(w, &http.Cookie{Name: authorizeCookie, Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true, Secure: strings.HasPrefix(s.BaseURL, "https://"), SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: s.cookieName(authorizeCookie), Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true, Secure: s.https(), SameSite: http.SameSiteLaxMode})
 }
 
 // page is GET / and GET /authorize. A consuming service's authorize request
 // is finished here the moment there is a session for it: mint the code and
 // send the browser back. Without a session, the request is kept in a
-// cookie and the sign-in view says where the person is headed.
+// cookie and the sign-in view says where the person is headed, unless the
+// service asked with prompt=none: then it only wants to know whether the
+// browser is already signed in here, and is told login_required at once,
+// with nothing shown and nothing kept.
 func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 	pending := s.readAuthorize(r)
+	silent := false
 	if q := r.URL.Query(); q.Get("redirect_uri") != "" {
 		pending = &authorizeRequest{RedirectURI: q.Get("redirect_uri"), State: q.Get("state"), CodeChallenge: q.Get("code_challenge")}
 		if !s.redirectAllowed(pending.RedirectURI) {
@@ -181,21 +186,23 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 			s.render(w, http.StatusForbidden, "page", view{Providers: s.providerFlags(), Error: "sign-ins are not handed off to that destination"})
 			return
 		}
+		silent = q.Get("prompt") == "none"
 	}
 
 	account, credential, signedIn := s.viewer(r)
 	if signedIn && pending != nil {
-		code, fail := s.mintHandoff(account, credential, pending.RedirectURI, pending.CodeChallenge)
+		// The token this code becomes is linked to this session.
+		code, fail := s.mintHandoff(account, credential, credential.ID, pending.RedirectURI, pending.CodeChallenge)
 		s.setAuthorize(w, nil)
 		if fail != nil {
 			s.render(w, fail.status, "page", view{Providers: s.providerFlags(), Error: fail.message})
 			return
 		}
-		glue := "?"
-		if strings.Contains(pending.RedirectURI, "?") {
-			glue = "&"
-		}
-		http.Redirect(w, r, pending.RedirectURI+glue+"code="+url.QueryEscape(code)+"&state="+url.QueryEscape(pending.State), http.StatusSeeOther)
+		http.Redirect(w, r, callbackRedirect(pending.RedirectURI, url.Values{"code": {code}, "state": {pending.State}}), http.StatusSeeOther)
+		return
+	}
+	if silent {
+		http.Redirect(w, r, callbackRedirect(pending.RedirectURI, url.Values{"error": {"login_required"}, "state": {pending.State}}), http.StatusSeeOther)
 		return
 	}
 	if pending != nil {
@@ -336,7 +343,7 @@ func (s *Server) uiGitHubPoll(w http.ResponseWriter, r *http.Request) {
 			s.renderFailure(w, r, err)
 			return
 		}
-		minted, issueErr := s.issue(r, account, "", "")
+		minted, issueErr := s.issue(r, account, "", "", "")
 		if issueErr != nil {
 			s.renderFailure(w, r, &failure{http.StatusForbidden, issueErr.Error(), ""})
 			return
@@ -358,6 +365,8 @@ func (s *Server) uiDiscordStart(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
+// uiSignOut ends the browser's session here, and with it every service
+// session handed off from it.
 func (s *Server) uiSignOut(w http.ResponseWriter, r *http.Request) {
 	if account, credential, ok := s.viewer(r); ok {
 		s.Store.RevokeToken(r.Context(), account.ID, credential.ID)
@@ -403,7 +412,7 @@ func (s *Server) uiMintToken(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "token"
 	}
-	minted, err := s.issue(r, account, name, "")
+	minted, err := s.issue(r, account, name, "", "")
 	if err != nil {
 		s.section(w, r, "tokens", &failure{http.StatusForbidden, err.Error(), ""}, "")
 		return
