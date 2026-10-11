@@ -77,7 +77,8 @@ API before somebody is:
 
     identityd grant identity-admin <handle-or-account-id>
 
-Also `identityd accounts`, `identityd groups`, `identityd revoke`. Every
+Also `identityd accounts`, `identityd groups`, `identityd create <group>
+[description]`, `identityd revoke`. Every
 change, from the page or the terminal, is in the audit log.
 
 ### A service that reads a group

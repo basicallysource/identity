@@ -183,6 +183,20 @@ func command(dbPath, name string, args []string) error {
 		}
 		return nil
 
+	case "create":
+		if len(args) < 1 || len(args) > 2 {
+			return fmt.Errorf("usage: identityd create <group> [description]")
+		}
+		description := ""
+		if len(args) == 2 {
+			description = args[1]
+		}
+		if err := db.CreateGroup(ctx, args[0], description, cliActor); err != nil {
+			return err
+		}
+		fmt.Printf("created %s\n", args[0])
+		return nil
+
 	case "grant", "revoke":
 		if len(args) != 2 {
 			return fmt.Errorf("usage: identityd %s <group> <account-id-or-handle>", name)
@@ -209,7 +223,7 @@ func command(dbPath, name string, args []string) error {
 		return nil
 
 	default:
-		return fmt.Errorf("unknown command %q; commands are accounts, groups, grant, revoke", name)
+		return fmt.Errorf("unknown command %q; commands are accounts, groups, create, grant, revoke", name)
 	}
 }
 
