@@ -46,7 +46,10 @@ type Server struct {
 	// RedirectAllow is the callback URLs a sign-in may be handed off to;
 	// one ending in / allows any path under it. Empty disables handoff.
 	RedirectAllow []string
-	Logger        *slog.Logger
+	// GroupReaders are the services that may read named groups' members
+	// without an account; see groups.go. Empty allows none.
+	GroupReaders []GroupReader
+	Logger       *slog.Logger
 	// Now is the clock, swapped in tests.
 	Now             func() time.Time
 	Avatars         *avatar.Assets

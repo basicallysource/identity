@@ -261,6 +261,9 @@ type Member struct {
 	// AddedBy An account id, or `cli`.
 	AddedBy string `json:"added_by"`
 	Handle  string `json:"handle"`
+
+	// Identities The member's provider proofs, so a provider id needs no second lookup.
+	Identities []Identity `json:"identities"`
 }
 
 // Token A freshly minted credential. The token itself is shown exactly once.
@@ -668,6 +671,9 @@ type ClientInterface interface {
 	DeleteGroup(ctx context.Context, name GroupName, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetGroup One group and its members.
+	//
+	// For identity-admin, or a group reader configured for this group. A
+	// reader asking for any other group is refused with 403.
 	//
 	// Corresponds with GET /v1/groups/{name} (the `GetGroup` operationId).
 	GetGroup(ctx context.Context, name GroupName, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1133,6 +1139,9 @@ func (c *Client) DeleteGroup(ctx context.Context, name GroupName, reqEditors ...
 }
 
 // GetGroup One group and its members.
+//
+// For identity-admin, or a group reader configured for this group. A
+// reader asking for any other group is refused with 403.
 //
 // Corresponds with GET /v1/groups/{name} (the `GetGroup` operationId).
 func (c *Client) GetGroup(ctx context.Context, name GroupName, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -2564,6 +2573,9 @@ type ClientWithResponsesInterface interface {
 	DeleteGroupWithResponse(ctx context.Context, name GroupName, reqEditors ...RequestEditorFn) (*DeleteGroupResponse, error)
 
 	// GetGroupWithResponse One group and its members.
+	//
+	// For identity-admin, or a group reader configured for this group. A
+	// reader asking for any other group is refused with 403.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -4624,6 +4636,9 @@ func (c *ClientWithResponses) DeleteGroupWithResponse(ctx context.Context, name 
 }
 
 // GetGroupWithResponse One group and its members.
+//
+// For identity-admin, or a group reader configured for this group. A
+// reader asking for any other group is refused with 403.
 //
 // Returns a wrapper object for the known response body format(s).
 //

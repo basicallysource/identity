@@ -22,6 +22,11 @@ info:
     server-side, and must check `token.audience` against its own origin
     before trusting a `whoami` answer.
 
+    A third credential is not a token: a **group reader**'s static secret,
+    configured on the server (`IDENTITY_GROUP_READERS`) by its hash with the
+    groups it may read. It may call `GET /v1/groups/{name}` for those groups
+    and nothing else.
+
     An application token minted for a browser that signed in here is linked
     to that sign-in: revoking the sign-in revokes the token, and signing in to
     the same application again from the same sign-in replaces it.
@@ -39,7 +44,7 @@ tags:
   - name: tokens
     description: Account-token management.
   - name: groups
-    description: Named sets of accounts; identity-admin only.
+    description: Named sets of accounts; identity-admin only, except that a group reader may read its own groups.
 
 security:
   - bearer: []
@@ -519,6 +524,9 @@ paths:
       operationId: getGroup
       tags: [groups]
       summary: One group and its members.
+      description: |
+        For identity-admin, or a group reader configured for this group. A
+        reader asking for any other group is refused with 403.
       responses:
         "200":
           description: The group.
@@ -716,12 +724,16 @@ components:
 
     Member:
       type: object
-      required: [account, handle, added_at, added_by]
+      required: [account, handle, added_at, added_by, identities]
       properties:
         account: { $ref: "#/components/schemas/AccountID" }
         handle: { type: string }
         added_at: { type: string, format: date-time }
         added_by: { type: string, description: "An account id, or `cli`." }
+        identities:
+          type: array
+          description: The member's provider proofs, so a provider id needs no second lookup.
+          items: { $ref: "#/components/schemas/Identity" }
 
     GroupDetail:
       type: object

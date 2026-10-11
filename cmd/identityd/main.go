@@ -76,6 +76,12 @@ func serve(dbPath string) {
 	}
 	defer db.Close()
 
+	readers, err := api.ParseGroupReaders(os.Getenv("IDENTITY_GROUP_READERS"))
+	if err != nil {
+		logger.Error("IDENTITY_GROUP_READERS", "error", err)
+		os.Exit(1)
+	}
+
 	server := &api.Server{
 		Store:  db,
 		GitHub: &provider.GitHub{ClientID: os.Getenv("IDENTITY_GITHUB_CLIENT_ID")},
@@ -86,6 +92,7 @@ func serve(dbPath string) {
 		BaseURL:        baseURL,
 		ClientIPHeader: os.Getenv("IDENTITY_CLIENT_IP_HEADER"),
 		RedirectAllow:  splitList(os.Getenv("IDENTITY_REDIRECT_ALLOW")),
+		GroupReaders:   readers,
 		Logger:         logger,
 	}
 	if os.Getenv("IDENTITY_ASSET_URL") != "" {

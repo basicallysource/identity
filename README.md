@@ -80,6 +80,28 @@ API before somebody is:
 Also `identityd accounts`, `identityd groups`, `identityd revoke`. Every
 change, from the page or the terminal, is in the audit log.
 
+### A service that reads a group
+
+A service that acts on membership with nobody signed in (a chat bot giving
+the members of a group a chat role, say) is a **group reader**: it holds a
+secret of its own, and identity holds only its SHA-256 and the groups it may
+read, in `IDENTITY_GROUP_READERS`:
+
+    IDENTITY_GROUP_READERS=chatbot:<sha256-hex-of-secret>:docs-maintainer
+
+The reader can `GET /v1/groups/{name}` for those groups, members and their
+provider ids included, and nothing else:
+
+    GET /v1/groups/docs-maintainer
+    Authorization: Bearer <the secret>
+
+    {"name": "docs-maintainer", "members": [{"account": "3f9c2a81d04b",
+      "handle": "ada", "identities": [{"provider": "discord", "id": "1234...",
+      "handle": "ada", "proved_at": "..."}], ...}], ...}
+
+Make a secret with `openssl rand -hex 32` and configure its hash with
+`printf %s "$SECRET" | shasum -a 256`.
+
 ## Any service, by hand
 
 Accept a bearer token, forward it:
@@ -136,6 +158,7 @@ Configuration is environment variables:
 | `IDENTITY_DISCORD_CLIENT_SECRET` | — | its secret |
 | `IDENTITY_CLIENT_IP_HEADER` | — | the header a proxy in front sets to the real client address, e.g. `CF-Connecting-IP`; empty trusts none |
 | `IDENTITY_REDIRECT_ALLOW` | — | comma-separated allowed callback URLs; a trailing slash allows descendants on the same origin; empty disables handoff |
+| `IDENTITY_GROUP_READERS` | — | services that may read named groups' members with a static secret: comma-separated `name:sha256-hex-of-secret:group+group`; empty allows none |
 | `IDENTITY_ASSET_URL` | — | asset-service API origin; enables profile photos when configured |
 | `IDENTITY_ASSET_TOKEN` | — | server credential with read/write access to the photo namespace |
 | `IDENTITY_ASSET_NAMESPACE` | `profile-avatars` | private photo namespace |

@@ -40,6 +40,18 @@ administrator is made with the `identityd grant` command against the database,
 since no API caller can be one before somebody is. Every change is audited in
 the same transaction, with the actor's account id or `cli`.
 
+Reading one group is the one thing a non-account may do. A group reader,
+configured in `IDENTITY_GROUP_READERS` as a name, the SHA-256 of a static
+secret and the groups it may read, can `GET /v1/groups/{name}` for exactly
+those groups, members' provider ids included, so a service that mirrors a
+group somewhere (a Discord role) needs no account and no administrator's
+token. It is configuration rather than a token kind because a reader is a
+deployment fact, not a person: it has no account to belong to, nothing to sign
+in with, and nothing to expire on it in a way an operator would notice. The
+configuration is not a credential, since only the hash is in it. Every reader
+is compared in constant time; a reader asking for another group is 403, and a
+secret that is no reader's falls through to the ordinary account check.
+
 ## The client package
 
 `client` is the consuming side, so that the rules live in one place: PKCE on

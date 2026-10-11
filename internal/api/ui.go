@@ -542,7 +542,7 @@ func (s *Server) groupsSection(w http.ResponseWriter, r *http.Request, fail *fai
 
 // groupSection renders one group's detail, with a message.
 func (s *Server) groupSection(w http.ResponseWriter, r *http.Request, name string, fail *failure) {
-	g, members, err := s.Store.Group(r.Context(), name)
+	detail, err := s.groupDetail(r.Context(), name)
 	if errors.Is(err, store.ErrNotFound) {
 		s.render(w, http.StatusNotFound, "error", view{Error: "no such group"})
 		return
@@ -551,10 +551,6 @@ func (s *Server) groupSection(w http.ResponseWriter, r *http.Request, name strin
 		s.logger().Error("page: group", "error", err)
 		s.render(w, http.StatusInternalServerError, "error", view{Error: "could not read the group"})
 		return
-	}
-	detail := groupDetailBody{Name: g.Name, Description: g.Description, CreatedAt: g.CreatedAt, CreatedBy: g.CreatedBy, Members: []memberBody{}}
-	for _, m := range members {
-		detail.Members = append(detail.Members, memberBody{Account: m.AccountID, Handle: m.Handle, AddedAt: m.AddedAt, AddedBy: m.AddedBy})
 	}
 	v := view{Admin: true, Group: &detail}
 	status := http.StatusOK

@@ -1,10 +1,16 @@
 package api
 
 import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +24,78 @@ import (
 // consuming service's handoff credential cannot reach these even if the
 // person behind it is an administrator. Administration is done here, signed
 // in here, on purpose.
+//
+// The one exception is reading a group. A configured group reader (see
+// GroupReader) may GET the groups it was given, members and their provider
+// ids included, and nothing else: no other group, no list of groups, no
+// write. That is for a service that acts on membership with nobody signed in,
+// such as a chat bot that mirrors a group into a chat role.
+
+// GroupReader is a service allowed to read the members of the named groups.
+// It holds a static secret of its own; identity is configured with only the
+// secret's SHA-256, so the configuration is not itself a credential.
+type GroupReader struct {
+	Name       string
+	SecretHash [sha256.Size]byte
+	Groups     []string
+}
+
+// ParseGroupReaders reads IDENTITY_GROUP_READERS: comma-separated entries of
+// name:sha256-hex-of-the-secret:group+group. A malformed entry is an error,
+// not a skipped line, so a typo cannot quietly cut a service off.
+func ParseGroupReaders(value string) ([]GroupReader, error) {
+	var readers []GroupReader
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.Split(entry, ":")
+		if len(parts) != 3 || parts[0] == "" || parts[2] == "" {
+			return nil, fmt.Errorf("group reader %q: want name:sha256-hex:group+group", entry)
+		}
+		sum, err := hex.DecodeString(parts[1])
+		if err != nil || len(sum) != sha256.Size {
+			return nil, fmt.Errorf("group reader %q: the secret's hash must be 64 hex characters", parts[0])
+		}
+		reader := GroupReader{Name: parts[0], Groups: strings.Split(parts[2], "+")}
+		copy(reader.SecretHash[:], sum)
+		readers = append(readers, reader)
+	}
+	return readers, nil
+}
+
+// groupReader reports which configured reader, if any, the request's bearer
+// secret belongs to. Every reader is compared, in constant time.
+func (s *Server) groupReader(r *http.Request) (GroupReader, bool) {
+	bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || len(s.GroupReaders) == 0 {
+		return GroupReader{}, false
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(bearer)))
+	var found GroupReader
+	match := false
+	for _, reader := range s.GroupReaders {
+		if subtle.ConstantTimeCompare(sum[:], reader.SecretHash[:]) == 1 {
+			found, match = reader, true
+		}
+	}
+	return found, match
+}
+
+// requireGroupRead lets a group reader read a group it was given, and
+// anybody else through requireAdmin.
+func (s *Server) requireGroupRead(w http.ResponseWriter, r *http.Request, group string) bool {
+	if reader, ok := s.groupReader(r); ok {
+		if !slices.Contains(reader.Groups, group) {
+			writeError(w, http.StatusForbidden, "this reader may not read that group")
+			return false
+		}
+		return true
+	}
+	_, ok := s.requireAdmin(w, r)
+	return ok
+}
 
 type groupBody struct {
 	Name        string    `json:"name"`
@@ -32,6 +110,9 @@ type memberBody struct {
 	Handle  string    `json:"handle"`
 	AddedAt time.Time `json:"added_at"`
 	AddedBy string    `json:"added_by"`
+	// Identities are the member's provider proofs, so a reader can act on a
+	// provider id (a Discord snowflake) without a second lookup.
+	Identities []identityBody `json:"identities"`
 }
 
 type groupDetailBody struct {
@@ -138,10 +219,11 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getGroup(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	name := r.PathValue("name")
+	if !s.requireGroupRead(w, r, name) {
 		return
 	}
-	g, members, err := s.Store.Group(r.Context(), r.PathValue("name"))
+	body, err := s.groupDetail(r.Context(), name)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "no such group")
@@ -151,11 +233,28 @@ func (s *Server) getGroup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not read the group")
 		return
 	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// groupDetail is one group and its members, each with their provider proofs.
+func (s *Server) groupDetail(ctx context.Context, name string) (groupDetailBody, error) {
+	g, members, err := s.Store.Group(ctx, name)
+	if err != nil {
+		return groupDetailBody{}, err
+	}
 	body := groupDetailBody{Name: g.Name, Description: g.Description, CreatedAt: g.CreatedAt, CreatedBy: g.CreatedBy, Members: []memberBody{}}
 	for _, m := range members {
-		body.Members = append(body.Members, memberBody{Account: m.AccountID, Handle: m.Handle, AddedAt: m.AddedAt, AddedBy: m.AddedBy})
+		identities, err := s.Store.IdentitiesFor(ctx, m.AccountID)
+		if err != nil {
+			return groupDetailBody{}, err
+		}
+		member := memberBody{Account: m.AccountID, Handle: m.Handle, AddedAt: m.AddedAt, AddedBy: m.AddedBy, Identities: []identityBody{}}
+		for _, identity := range identities {
+			member.Identities = append(member.Identities, identityBody{Provider: identity.Provider, ID: identity.ProviderID, Handle: identity.Handle, ProvedAt: identity.ProvedAt})
+		}
+		body.Members = append(body.Members, member)
 	}
-	writeJSON(w, http.StatusOK, body)
+	return body, nil
 }
 
 func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {

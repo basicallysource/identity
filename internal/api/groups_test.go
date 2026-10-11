@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"strings"
@@ -168,5 +169,71 @@ func TestGroupAdministration(t *testing.T) {
 	}
 	if got := status(t, do(t, "GET", ts.URL+"/v1/groups/core", admin.Token, "")); got != http.StatusNotFound {
 		t.Fatalf("a deleted group answered %d", got)
+	}
+}
+
+func TestGroupReaderReadsOnlyItsGroups(t *testing.T) {
+	ts, server := newTestServer(t)
+	minted := githubSignIn(t, ts)
+	ctx := context.Background()
+	for _, group := range []string{"docs-maintainer", "basically-core"} {
+		if err := server.Store.CreateGroup(ctx, group, "", "cli"); err != nil {
+			t.Fatal(err)
+		}
+		if err := server.Store.AddMember(ctx, group, minted.Account, "cli"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret := "reader-secret"
+	readers, err := ParseGroupReaders("chatbot:" + fmt.Sprintf("%x", sha256.Sum256([]byte(secret))) + ":docs-maintainer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.GroupReaders = readers
+
+	// Its own group, with the members' provider ids.
+	group := decode[groupDetailBody](t, do(t, "GET", ts.URL+"/v1/groups/docs-maintainer", secret, ""))
+	if len(group.Members) != 1 || group.Members[0].Account != minted.Account {
+		t.Fatalf("members = %#v", group.Members)
+	}
+	ids := group.Members[0].Identities
+	if len(ids) != 1 || ids[0].Provider != "github" || ids[0].ID != "583231" {
+		t.Fatalf("identities = %#v", ids)
+	}
+
+	// Nothing else: another group, the list, the log, a write.
+	for _, probe := range []struct {
+		method, path string
+		want         int
+	}{
+		{"GET", "/v1/groups/basically-core", http.StatusForbidden},
+		{"GET", "/v1/groups/no-such-group", http.StatusForbidden},
+		{"GET", "/v1/groups", http.StatusUnauthorized},
+		{"GET", "/v1/groups/audit", http.StatusUnauthorized},
+		{"DELETE", "/v1/groups/docs-maintainer", http.StatusUnauthorized},
+		{"PUT", "/v1/groups/docs-maintainer/members/000000000000", http.StatusUnauthorized},
+		{"GET", "/v1/whoami", http.StatusUnauthorized},
+	} {
+		if got := status(t, do(t, probe.method, ts.URL+probe.path, secret, "")); got != probe.want {
+			t.Errorf("%s %s answered %d for a group reader, want %d", probe.method, probe.path, got, probe.want)
+		}
+	}
+
+	// A wrong secret is nobody.
+	if got := status(t, do(t, "GET", ts.URL+"/v1/groups/docs-maintainer", "not-the-secret", "")); got != http.StatusUnauthorized {
+		t.Errorf("a wrong secret answered %d", got)
+	}
+}
+
+func TestParseGroupReadersRefusesMalformedEntries(t *testing.T) {
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte("s")))
+	for _, bad := range []string{"chatbot", "chatbot:" + hash, "chatbot:nothex:g", "chatbot:abcd:g", ":" + hash + ":g", "chatbot:" + hash + ":"} {
+		if _, err := ParseGroupReaders(bad); err == nil {
+			t.Errorf("%q parsed", bad)
+		}
+	}
+	readers, err := ParseGroupReaders(" a:" + hash + ":x+y , ")
+	if err != nil || len(readers) != 1 || readers[0].Name != "a" || len(readers[0].Groups) != 2 {
+		t.Fatalf("readers = %#v, %v", readers, err)
 	}
 }
