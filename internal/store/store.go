@@ -255,6 +255,57 @@ func (db *DB) SignIn(ctx context.Context, provider, providerID, handle string) (
 	return account, nil
 }
 
+// AddIdentity names a provider identity before its owner has ever signed in,
+// so that a group can include somebody known only by, say, their Discord id.
+// It returns the account the identity belongs to, making one when there is
+// none, and whether it made it. The identity carries no proof (proved_at is
+// empty, read as the zero time) until its owner's first sign-in at the
+// provider, which lands in this same account and proves it. An identity
+// already on an account is left exactly as it is.
+func (db *DB) AddIdentity(ctx context.Context, provider, providerID, handle string) (Account, bool, error) {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return Account{}, false, fmt.Errorf("store: begin add identity: %w", err)
+	}
+	defer tx.Rollback()
+
+	var accountID string
+	created := false
+	err = tx.QueryRowContext(ctx,
+		`SELECT account_id FROM identities WHERE provider = ? AND provider_id = ?`,
+		provider, providerID).Scan(&accountID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		stamp := time.Now().UTC().Format(time.RFC3339Nano)
+		if accountID, err = newID(); err != nil {
+			return Account{}, false, err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO accounts (id, handle, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+			accountID, handle, stamp, stamp); err != nil {
+			return Account{}, false, fmt.Errorf("store: create account: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO identities (provider, provider_id, account_id, handle, proved_at, linked_at)
+			 VALUES (?, ?, ?, ?, '', ?)`,
+			provider, providerID, accountID, handle, stamp); err != nil {
+			return Account{}, false, fmt.Errorf("store: add identity: %w", err)
+		}
+		created = true
+	case err != nil:
+		return Account{}, false, fmt.Errorf("store: find identity: %w", err)
+	}
+
+	account, err := accountByID(ctx, tx, accountID)
+	if err != nil {
+		return Account{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Account{}, false, fmt.Errorf("store: commit add identity: %w", err)
+	}
+	return account, created, nil
+}
+
 // Link attaches a provider identity to an existing account. An identity
 // already proving another account is refused, never moved.
 func (db *DB) Link(ctx context.Context, accountID, provider, providerID, handle string) error {

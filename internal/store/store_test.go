@@ -49,6 +49,36 @@ func TestSignInCreatesOnceAndRefreshes(t *testing.T) {
 	}
 }
 
+// Somebody named by their provider id before they ever sign in is an account a
+// group can hold, and their first sign-in is into that account, not a new one.
+func TestAddIdentityIsTheAccountTheFirstSignInLandsIn(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+
+	added, created, err := db.AddIdentity(ctx, "discord", "1143590141936549978", "barthel")
+	if err != nil || !created || added.Handle != "barthel" {
+		t.Fatalf("AddIdentity: %+v created=%v err=%v", added, created, err)
+	}
+	if ids, err := db.IdentitiesFor(ctx, added.ID); err != nil || len(ids) != 1 || !ids[0].ProvedAt.IsZero() {
+		t.Fatalf("an identity nobody proved reads as proved: %+v %v", ids, err)
+	}
+	again, created, err := db.AddIdentity(ctx, "discord", "1143590141936549978", "someone-else")
+	if err != nil || created || again.ID != added.ID || again.Handle != "barthel" {
+		t.Fatalf("adding it again changed it: %+v created=%v err=%v", again, created, err)
+	}
+
+	signed, err := db.SignIn(ctx, "discord", "1143590141936549978", "uwe_barthel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signed.ID != added.ID {
+		t.Fatalf("the first sign-in made a second account: %s, not %s", signed.ID, added.ID)
+	}
+	if ids, _ := db.IdentitiesFor(ctx, added.ID); len(ids) != 1 || ids[0].ProvedAt.IsZero() || ids[0].Handle != "uwe_barthel" {
+		t.Fatalf("the sign-in did not prove the identity: %+v", ids)
+	}
+}
+
 func TestLink(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()

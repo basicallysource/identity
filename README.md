@@ -81,6 +81,17 @@ Also `identityd accounts`, `identityd groups`, `identityd create <group>
 [description]`, `identityd revoke`. Every
 change, from the page or the terminal, is in the audit log.
 
+Somebody can be put in a group before they have ever signed in, known only by
+their provider id:
+
+    identityd add discord <discord-user-id> <handle>
+    identityd grant <group> <handle>
+
+`add` makes the account their identity belongs to, with no proof on it yet.
+Their first sign-in with that provider lands in this same account and proves
+it, so a service reading the group (a chat bot's role, say) counts them from
+the start.
+
 ### A service that reads a group
 
 A service that acts on membership with nobody signed in (a chat bot giving

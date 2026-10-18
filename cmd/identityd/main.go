@@ -222,8 +222,23 @@ func command(dbPath, name string, args []string) error {
 		fmt.Printf("added %s (%s) to %s\n", account.Handle, account.ID, group)
 		return nil
 
+	case "add":
+		if len(args) != 3 || (args[0] != "discord" && args[0] != "github") {
+			return fmt.Errorf("usage: identityd add discord|github <provider-user-id> <handle>")
+		}
+		account, created, err := db.AddIdentity(ctx, args[0], args[1], args[2])
+		if err != nil {
+			return err
+		}
+		if !created {
+			fmt.Printf("%s:%s is already %s (%s)\n", args[0], args[1], account.Handle, account.ID)
+			return nil
+		}
+		fmt.Printf("added %s (%s) for %s:%s; their first %s sign-in is into it\n", account.Handle, account.ID, args[0], args[1], args[0])
+		return nil
+
 	default:
-		return fmt.Errorf("unknown command %q; commands are accounts, groups, create, grant, revoke", name)
+		return fmt.Errorf("unknown command %q; commands are accounts, groups, create, grant, revoke, add", name)
 	}
 }
 
