@@ -18,8 +18,11 @@ import (
 	"github.com/basicallysource/identity/internal/store"
 )
 
-// Group administration. Every route here is for members of identity-admin
-// holding an account token: the secure middleware already refuses an
+// Group administration. Every route here is for members of identity-admin or
+// identity-manager holding an account token. A manager may read everything,
+// create groups and add members to any group but identity-admin; deleting a
+// group and removing a member are identity-admin's alone. The token must be
+// an account token: the secure middleware already refuses an
 // application (audience-bound) token anything past whoami and avatar, so a
 // consuming service's handoff credential cannot reach these even if the
 // person behind it is an administrator. Administration is done here, signed
@@ -84,7 +87,7 @@ func (s *Server) groupReader(r *http.Request) (GroupReader, bool) {
 }
 
 // requireGroupRead lets a group reader read a group it was given, and
-// anybody else through requireAdmin.
+// anybody else through requireManager.
 func (s *Server) requireGroupRead(w http.ResponseWriter, r *http.Request, group string) bool {
 	if reader, ok := s.groupReader(r); ok {
 		if !slices.Contains(reader.Groups, group) {
@@ -93,7 +96,7 @@ func (s *Server) requireGroupRead(w http.ResponseWriter, r *http.Request, group 
 		}
 		return true
 	}
-	_, ok := s.requireAdmin(w, r)
+	_, _, ok := s.requireManager(w, r)
 	return ok
 }
 
@@ -141,33 +144,66 @@ type accountBody struct {
 	Groups     []string       `json:"groups"`
 }
 
-// requireAdmin resolves the caller and refuses anybody outside identity-admin.
-// It writes the refusal itself; the caller just returns on false.
-func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (store.Account, bool) {
+// groupRoles reports whether an account is in identity-admin and whether it
+// is in identity-manager.
+func (s *Server) groupRoles(ctx context.Context, accountID string) (admin, manager bool, err error) {
+	groups, err := s.Store.GroupsFor(ctx, accountID)
+	if err != nil {
+		return false, false, err
+	}
+	return slices.Contains(groups, store.AdminGroup), slices.Contains(groups, store.ManagerGroup), nil
+}
+
+// requireManager resolves the caller and refuses anybody in neither
+// identity-admin nor identity-manager. It reports whether the caller is an
+// administrator, for the routes that go further for one. It writes the
+// refusal itself; the caller just returns on false.
+func (s *Server) requireManager(w http.ResponseWriter, r *http.Request) (store.Account, bool, bool) {
 	account, _, err := s.authenticate(r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "a live bearer token is required")
-		return store.Account{}, false
+		return store.Account{}, false, false
 	}
-	admin, err := s.Store.IsMember(r.Context(), store.AdminGroup, account.ID)
+	admin, manager, err := s.groupRoles(r.Context(), account.ID)
 	if err != nil {
-		s.logger().Error("groups: admin check", "error", err)
+		s.logger().Error("groups: role check", "error", err)
 		writeError(w, http.StatusInternalServerError, "could not read the account")
+		return store.Account{}, false, false
+	}
+	if !admin && !manager {
+		writeError(w, http.StatusForbidden, managingRefusal)
+		return store.Account{}, false, false
+	}
+	return account, admin, true
+}
+
+// requireAdmin is requireManager for what only identity-admin may do:
+// deleting a group and removing a member.
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (store.Account, bool) {
+	account, admin, ok := s.requireManager(w, r)
+	if !ok {
 		return store.Account{}, false
 	}
 	if !admin {
-		writeError(w, http.StatusForbidden, "managing groups requires membership of "+store.AdminGroup)
+		writeError(w, http.StatusForbidden, removingRefusal)
 		return store.Account{}, false
 	}
 	return account, true
 }
+
+// The refusals, shared by the API and the page.
+const (
+	managingRefusal   = "managing groups requires membership of " + store.AdminGroup + " or " + store.ManagerGroup
+	removingRefusal   = "deleting groups and removing members requires membership of " + store.AdminGroup
+	adminGroupRefusal = "only members of " + store.AdminGroup + " may add to it"
+)
 
 func describeGroup(g store.Group) groupBody {
 	return groupBody{Name: g.Name, Description: g.Description, CreatedAt: g.CreatedAt, CreatedBy: g.CreatedBy, Members: g.Members}
 }
 
 func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	if _, _, ok := s.requireManager(w, r); !ok {
 		return
 	}
 	groups, err := s.Store.Groups(r.Context())
@@ -184,7 +220,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireAdmin(w, r)
+	actor, _, ok := s.requireManager(w, r)
 	if !ok {
 		return
 	}
@@ -279,11 +315,15 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireAdmin(w, r)
+	actor, admin, ok := s.requireManager(w, r)
 	if !ok {
 		return
 	}
 	group, account := r.PathValue("name"), r.PathValue("account")
+	if group == store.AdminGroup && !admin {
+		writeError(w, http.StatusForbidden, adminGroupRefusal)
+		return
+	}
 	err := s.Store.AddMember(r.Context(), group, account, actor.ID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -319,7 +359,7 @@ func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) groupAudit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	if _, _, ok := s.requireManager(w, r); !ok {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -340,7 +380,7 @@ func (s *Server) groupAudit(w http.ResponseWriter, r *http.Request) {
 // group: by handle, with every provider identity shown, because two people
 // can share a handle and the provider id is what tells them apart.
 func (s *Server) searchAccounts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAdmin(w, r); !ok {
+	if _, _, ok := s.requireManager(w, r); !ok {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))

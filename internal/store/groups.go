@@ -29,6 +29,13 @@ import (
 // can never lock everybody out of its own administration.
 const AdminGroup = "identity-admin"
 
+// ManagerGroup is the group whose members may manage groups short of taking
+// anything away: they see every group and account, create groups and add
+// members to any group but AdminGroup. Deleting a group and removing a
+// member stay with AdminGroup. Like AdminGroup, it is made by the operator
+// command the first time somebody is granted it.
+const ManagerGroup = "identity-manager"
+
 var (
 	// ErrBadGroupName means the name is not lowercase letters, digits and
 	// hyphens, 1 to 63 characters, starting with a letter or digit.

@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -43,7 +44,8 @@ type authorizeRequest struct {
 func (a authorizeRequest) Host() string { return redirectHost(a.RedirectURI) }
 
 // The page has tabs, one URL each, plain links between them: "account" at
-// / is everybody's, "groups" at /groups is identity-admin's. A tab is a
+// / is everybody's, "groups" at /groups and "accounts" at /accounts are for
+// identity-admin and identity-manager. A tab is a
 // full page render; only the parts inside a tab change without a reload.
 const (
 	tabMe       = "me"
@@ -67,6 +69,10 @@ type view struct {
 	Tab       string
 	Providers map[string]bool
 	Tokens    []tokenRow
+	// Manage is identity-admin or identity-manager: the groups and accounts
+	// tabs. Admin is identity-admin alone: deleting groups, removing members
+	// and adding to identity-admin.
+	Manage    bool
 	Admin     bool
 	Groups    []groupBody
 	Audit     []auditBody
@@ -101,16 +107,13 @@ func (s *Server) signedInView(r *http.Request, account store.Account, credential
 		return view{}, err
 	}
 	v := view{Me: &me, Tab: tabMe, Providers: s.providerFlags(), Tokens: tokens}
-	for _, g := range me.Groups {
-		if g == store.AdminGroup {
-			v.Admin = true
-		}
-	}
+	v.Admin = slices.Contains(me.Groups, store.AdminGroup)
+	v.Manage = v.Admin || slices.Contains(me.Groups, store.ManagerGroup)
 	return v, nil
 }
 
-// groupsPage is the groups tab, for identity-admin. Anybody else is sent
-// to the account tab, which is the only one they have.
+// groupsPage is the groups tab, for identity-admin and identity-manager.
+// Anybody else is sent to the account tab, which is the only one they have.
 func (s *Server) groupsPage(w http.ResponseWriter, r *http.Request) {
 	v, ok := s.adminPage(w, r)
 	if !ok {
@@ -221,8 +224,8 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "page", v)
 }
 
-// adminPage is the start of every identity-admin tab: the signed-in view,
-// or a redirect to the only tab a non-admin has.
+// adminPage is the start of the groups and accounts tabs: the signed-in
+// view, or a redirect to the only tab somebody who cannot manage groups has.
 func (s *Server) adminPage(w http.ResponseWriter, r *http.Request) (view, bool) {
 	account, credential, signedIn := s.viewer(r)
 	if !signedIn {
@@ -235,7 +238,7 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request) (view, bool) 
 		s.render(w, http.StatusInternalServerError, "page", view{Providers: s.providerFlags(), Error: "could not read the account"})
 		return view{}, false
 	}
-	if !v.Admin {
+	if !v.Manage {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return view{}, false
 	}
@@ -507,28 +510,42 @@ func (s *Server) uiDeleteAvatar(w http.ResponseWriter, r *http.Request) {
 	s.section(w, r, "photo", nil, "")
 }
 
-// -- groups, for identity-admin -----------------------------------------
+// -- groups, for identity-admin and identity-manager ---------------------
 
-// admin is requireAdmin for the page: the refusal is a fragment, and a
-// signed-out caller is sent to the front.
-func (s *Server) admin(w http.ResponseWriter, r *http.Request) (store.Account, bool) {
+// manager is requireManager for the page: the refusal is a fragment, and a
+// signed-out caller is sent to the front. It reports whether the caller is
+// in identity-admin.
+func (s *Server) manager(w http.ResponseWriter, r *http.Request) (store.Account, bool, bool) {
 	account, _, ok := s.viewer(r)
 	if !ok {
 		w.Header().Set("HX-Redirect", "/")
 		w.WriteHeader(http.StatusNoContent)
+		return store.Account{}, false, false
+	}
+	admin, manager, err := s.groupRoles(r.Context(), account.ID)
+	if err != nil || (!admin && !manager) {
+		s.render(w, http.StatusForbidden, "error", view{Error: managingRefusal})
+		return store.Account{}, false, false
+	}
+	return account, admin, true
+}
+
+// admin is requireAdmin for the page.
+func (s *Server) admin(w http.ResponseWriter, r *http.Request) (store.Account, bool) {
+	account, admin, ok := s.manager(w, r)
+	if !ok {
 		return store.Account{}, false
 	}
-	isAdmin, err := s.Store.IsMember(r.Context(), store.AdminGroup, account.ID)
-	if err != nil || !isAdmin {
-		s.render(w, http.StatusForbidden, "error", view{Error: "managing groups requires membership of " + store.AdminGroup})
+	if !admin {
+		s.render(w, http.StatusForbidden, "error", view{Error: removingRefusal})
 		return store.Account{}, false
 	}
 	return account, true
 }
 
 // groupsSection renders the groups list and audit log, with a message.
-func (s *Server) groupsSection(w http.ResponseWriter, r *http.Request, fail *failure) {
-	v := view{Admin: true}
+func (s *Server) groupsSection(w http.ResponseWriter, r *http.Request, admin bool, fail *failure) {
+	v := view{Manage: true, Admin: admin}
 	if err := s.fillGroups(r, &v); err != nil {
 		s.logger().Error("page: groups", "error", err)
 		v.Error = "could not read the groups"
@@ -541,7 +558,7 @@ func (s *Server) groupsSection(w http.ResponseWriter, r *http.Request, fail *fai
 }
 
 // groupSection renders one group's detail, with a message.
-func (s *Server) groupSection(w http.ResponseWriter, r *http.Request, name string, fail *failure) {
+func (s *Server) groupSection(w http.ResponseWriter, r *http.Request, name string, admin bool, fail *failure) {
 	detail, err := s.groupDetail(r.Context(), name)
 	if errors.Is(err, store.ErrNotFound) {
 		s.render(w, http.StatusNotFound, "error", view{Error: "no such group"})
@@ -552,7 +569,7 @@ func (s *Server) groupSection(w http.ResponseWriter, r *http.Request, name strin
 		s.render(w, http.StatusInternalServerError, "error", view{Error: "could not read the group"})
 		return
 	}
-	v := view{Admin: true, Group: &detail}
+	v := view{Manage: true, Admin: admin, Group: &detail}
 	status := http.StatusOK
 	if fail != nil {
 		v.Error, status = fail.message, fail.status
@@ -561,7 +578,7 @@ func (s *Server) groupSection(w http.ResponseWriter, r *http.Request, name strin
 }
 
 func (s *Server) uiCreateGroup(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.admin(w, r)
+	actor, admin, ok := s.manager(w, r)
 	if !ok {
 		return
 	}
@@ -570,23 +587,24 @@ func (s *Server) uiCreateGroup(w http.ResponseWriter, r *http.Request) {
 	err := s.Store.CreateGroup(r.Context(), name, r.Form.Get("description"), actor.ID)
 	switch {
 	case errors.Is(err, store.ErrBadGroupName):
-		s.groupsSection(w, r, &failure{http.StatusBadRequest, "a group name is 1 to 63 lowercase letters, digits and hyphens, starting with a letter or digit", ""})
+		s.groupsSection(w, r, admin, &failure{http.StatusBadRequest, "a group name is 1 to 63 lowercase letters, digits and hyphens, starting with a letter or digit", ""})
 	case errors.Is(err, store.ErrExists):
-		s.groupsSection(w, r, &failure{http.StatusConflict, "a group with that name already exists", ""})
+		s.groupsSection(w, r, admin, &failure{http.StatusConflict, "a group with that name already exists", ""})
 	case err != nil:
 		s.logger().Error("groups: create", "error", err)
-		s.groupsSection(w, r, &failure{http.StatusInternalServerError, "could not create the group", ""})
+		s.groupsSection(w, r, admin, &failure{http.StatusInternalServerError, "could not create the group", ""})
 	default:
 		s.logger().Info("created a group", "group", name, "by", actor.ID)
-		s.groupsSection(w, r, nil)
+		s.groupsSection(w, r, admin, nil)
 	}
 }
 
 func (s *Server) uiGroup(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.admin(w, r); !ok {
+	_, admin, ok := s.manager(w, r)
+	if !ok {
 		return
 	}
-	s.groupSection(w, r, r.PathValue("name"), nil)
+	s.groupSection(w, r, r.PathValue("name"), admin, nil)
 }
 
 func (s *Server) uiDeleteGroup(w http.ResponseWriter, r *http.Request) {
@@ -598,34 +616,38 @@ func (s *Server) uiDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	err := s.Store.DeleteGroup(r.Context(), name, actor.ID)
 	switch {
 	case errors.Is(err, store.ErrReservedGroup):
-		s.groupSection(w, r, name, &failure{http.StatusForbidden, store.AdminGroup + " cannot be deleted", ""})
+		s.groupSection(w, r, name, true, &failure{http.StatusForbidden, store.AdminGroup + " cannot be deleted", ""})
 	case errors.Is(err, store.ErrNotFound):
-		s.groupsSection(w, r, &failure{http.StatusNotFound, "no such group", ""})
+		s.groupsSection(w, r, true, &failure{http.StatusNotFound, "no such group", ""})
 	case err != nil:
 		s.logger().Error("groups: delete", "error", err)
-		s.groupSection(w, r, name, &failure{http.StatusInternalServerError, "could not delete the group", ""})
+		s.groupSection(w, r, name, true, &failure{http.StatusInternalServerError, "could not delete the group", ""})
 	default:
 		s.logger().Info("deleted a group", "group", name, "by", actor.ID)
-		s.groupsSection(w, r, nil)
+		s.groupsSection(w, r, true, nil)
 	}
 }
 
 func (s *Server) uiAddMember(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.admin(w, r)
+	actor, admin, ok := s.manager(w, r)
 	if !ok {
 		return
 	}
 	name, account := r.PathValue("name"), r.PathValue("account")
+	if name == store.AdminGroup && !admin {
+		s.groupSection(w, r, name, admin, &failure{http.StatusForbidden, adminGroupRefusal, ""})
+		return
+	}
 	err := s.Store.AddMember(r.Context(), name, account, actor.ID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		s.groupSection(w, r, name, &failure{http.StatusNotFound, "no such group or account", ""})
+		s.groupSection(w, r, name, admin, &failure{http.StatusNotFound, "no such group or account", ""})
 	case err != nil:
 		s.logger().Error("groups: add member", "error", err)
-		s.groupSection(w, r, name, &failure{http.StatusInternalServerError, "could not add the member", ""})
+		s.groupSection(w, r, name, admin, &failure{http.StatusInternalServerError, "could not add the member", ""})
 	default:
 		s.logger().Info("added a member", "group", name, "account", account, "by", actor.ID)
-		s.groupSection(w, r, name, nil)
+		s.groupSection(w, r, name, admin, nil)
 	}
 }
 
@@ -638,22 +660,23 @@ func (s *Server) uiRemoveMember(w http.ResponseWriter, r *http.Request) {
 	err := s.Store.RemoveMember(r.Context(), name, account, actor.ID)
 	switch {
 	case errors.Is(err, store.ErrLastAdmin):
-		s.groupSection(w, r, name, &failure{http.StatusForbidden, "that would leave " + store.AdminGroup + " empty; add another administrator first", ""})
+		s.groupSection(w, r, name, true, &failure{http.StatusForbidden, "that would leave " + store.AdminGroup + " empty; add another administrator first", ""})
 	case errors.Is(err, store.ErrNotFound):
-		s.groupSection(w, r, name, &failure{http.StatusNotFound, "that account is not in that group", ""})
+		s.groupSection(w, r, name, true, &failure{http.StatusNotFound, "that account is not in that group", ""})
 	case err != nil:
 		s.logger().Error("groups: remove member", "error", err)
-		s.groupSection(w, r, name, &failure{http.StatusInternalServerError, "could not remove the member", ""})
+		s.groupSection(w, r, name, true, &failure{http.StatusInternalServerError, "could not remove the member", ""})
 	default:
 		s.logger().Info("removed a member", "group", name, "account", account, "by", actor.ID)
-		s.groupSection(w, r, name, nil)
+		s.groupSection(w, r, name, true, nil)
 	}
 }
 
 // uiSearchAccounts answers the add-a-person search box inside a group with
 // matches and an add button on each, marking the ones already in it.
 func (s *Server) uiSearchAccounts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.admin(w, r); !ok {
+	_, admin, ok := s.manager(w, r)
+	if !ok {
 		return
 	}
 	q := r.URL.Query()
@@ -662,7 +685,7 @@ func (s *Server) uiSearchAccounts(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusInternalServerError, "error", view{Error: "could not search accounts"})
 		return
 	}
-	v := view{Admin: true, Group: &groupDetailBody{Name: q.Get("group")}, Accounts: []accountBody{}}
+	v := view{Manage: true, Admin: admin, Group: &groupDetailBody{Name: q.Get("group")}, Accounts: []accountBody{}}
 	for _, m := range matches {
 		groups, _ := s.Store.GroupsFor(r.Context(), m.Account.ID)
 		body := accountBody{Account: m.Account.ID, Handle: m.Account.Handle, CreatedAt: m.Account.CreatedAt, Identities: []identityBody{}, Groups: groups}

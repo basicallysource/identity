@@ -237,3 +237,79 @@ func TestParseGroupReadersRefusesMalformedEntries(t *testing.T) {
 		t.Fatalf("readers = %#v, %v", readers, err)
 	}
 }
+
+// makeManager is makeAdmin for identity-manager.
+func makeManager(t *testing.T, server *Server, accountID string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := server.Store.CreateGroup(ctx, store.ManagerGroup, "", "cli"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Store.AddMember(ctx, store.ManagerGroup, accountID, "cli"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGroupManagerAddsButNeverTakesAway(t *testing.T) {
+	ts, server := newTestServer(t)
+	manager := githubSignIn(t, ts)
+	makeManager(t, server, manager.Account)
+	ctx := context.Background()
+	admin, err := server.Store.SignIn(ctx, "discord", "1", "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeAdmin(t, server, admin.ID)
+	nelly, err := server.Store.SignIn(ctx, "discord", "77", "nelly")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Allowed: every read, creating a group, and adding to any group but
+	// identity-admin, identity-manager included.
+	for _, probe := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{"GET", "/v1/groups", "", http.StatusOK},
+		{"GET", "/v1/groups/audit", "", http.StatusOK},
+		{"GET", "/v1/accounts?q=nel", "", http.StatusOK},
+		{"POST", "/v1/groups", `{"name":"core"}`, http.StatusCreated},
+		{"GET", "/v1/groups/core", "", http.StatusOK},
+		{"GET", "/v1/groups/" + store.AdminGroup, "", http.StatusOK},
+		{"PUT", "/v1/groups/core/members/" + nelly.ID, "", http.StatusNoContent},
+		{"PUT", "/v1/groups/" + store.ManagerGroup + "/members/" + nelly.ID, "", http.StatusNoContent},
+		{"PUT", "/v1/groups/core/members/000000000000", "", http.StatusNotFound},
+	} {
+		if got := status(t, do(t, probe.method, ts.URL+probe.path, manager.Token, probe.body)); got != probe.want {
+			t.Errorf("manager %s %s answered %d, want %d", probe.method, probe.path, got, probe.want)
+		}
+	}
+
+	// Refused: adding to identity-admin (themselves or anybody), deleting
+	// any group, removing any member, their own membership included.
+	for _, probe := range []struct{ method, path string }{
+		{"PUT", "/v1/groups/" + store.AdminGroup + "/members/" + manager.Account},
+		{"PUT", "/v1/groups/" + store.AdminGroup + "/members/" + nelly.ID},
+		{"DELETE", "/v1/groups/core"},
+		{"DELETE", "/v1/groups/" + store.ManagerGroup},
+		{"DELETE", "/v1/groups/core/members/" + nelly.ID},
+		{"DELETE", "/v1/groups/" + store.ManagerGroup + "/members/" + manager.Account},
+		{"DELETE", "/v1/groups/" + store.AdminGroup + "/members/" + admin.ID},
+	} {
+		if got := status(t, do(t, probe.method, ts.URL+probe.path, manager.Token, "")); got != http.StatusForbidden {
+			t.Errorf("manager %s %s answered %d, want 403", probe.method, probe.path, got)
+		}
+	}
+
+	// Nothing the refusals touched changed.
+	for group, want := range map[string]int{"core": 1, store.ManagerGroup: 2, store.AdminGroup: 1} {
+		_, members, err := server.Store.Group(ctx, group)
+		if err != nil || len(members) != want {
+			t.Errorf("%s has %d members (%v), want %d", group, len(members), err, want)
+		}
+	}
+	if in, _ := server.Store.IsMember(ctx, store.AdminGroup, manager.Account); in {
+		t.Fatal("a manager made themselves an administrator")
+	}
+}

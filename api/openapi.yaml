@@ -44,7 +44,7 @@ tags:
   - name: tokens
     description: Account-token management.
   - name: groups
-    description: Named sets of accounts; identity-admin only, except that a group reader may read its own groups.
+    description: Named sets of accounts; for identity-admin and identity-manager, except that a group reader may read its own groups. Deleting a group, removing a member and adding to identity-admin are identity-admin only.
 
 security:
   - bearer: []
@@ -525,7 +525,7 @@ paths:
       tags: [groups]
       summary: One group and its members.
       description: |
-        For identity-admin, or a group reader configured for this group. A
+        For identity-admin, identity-manager, or a group reader configured for this group. A
         reader asking for any other group is refused with 403.
       responses:
         "200":
@@ -540,7 +540,7 @@ paths:
     delete:
       operationId: deleteGroup
       tags: [groups]
-      summary: Delete a group and every membership in it. identity-admin is refused.
+      summary: Delete a group and every membership in it. identity-admin only; identity-admin itself is refused.
       responses:
         "204": { description: Deleted. }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -555,7 +555,7 @@ paths:
     put:
       operationId: addMember
       tags: [groups]
-      summary: Put an account in a group. Idempotent.
+      summary: Put an account in a group. Idempotent. Only identity-admin may add to identity-admin.
       responses:
         "204": { description: The account is in the group. }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -565,7 +565,7 @@ paths:
     delete:
       operationId: removeMember
       tags: [groups]
-      summary: Take an account out of a group. The last identity-admin is refused.
+      summary: Take an account out of a group. identity-admin only; the last identity-admin is refused.
       responses:
         "204": { description: Removed. }
         "401": { $ref: "#/components/responses/Unauthorized" }

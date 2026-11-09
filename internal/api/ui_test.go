@@ -371,3 +371,98 @@ func TestPageGroupAdministration(t *testing.T) {
 		t.Fatalf("delete group: %d\n%s", status, body)
 	}
 }
+
+func TestPageGroupManager(t *testing.T) {
+	ts, server := newTestServer(t)
+	b := newBrowser(t, ts)
+	b.signInViaPage()
+	me := decode[whoamiResponse](t, do(t, "GET", ts.URL+"/v1/whoami", b.cookies["identity_session"].Value, ""))
+	makeManager(t, server, me.Account)
+	boss, err := server.Store.SignIn(t.Context(), "discord", "1", "boss")
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeAdmin(t, server, boss.ID)
+	nelly, err := server.Store.SignIn(t.Context(), "discord", "77", "nelly")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both tabs are theirs.
+	status, body, _ := b.page(http.MethodGet, "/", nil)
+	if status != http.StatusOK || !strings.Contains(body, `href="/groups"`) || !strings.Contains(body, `href="/accounts"`) {
+		t.Fatalf("manager account tab: %d\n%s", status, body)
+	}
+	status, body, _ = b.page(http.MethodGet, "/groups", nil)
+	if status != http.StatusOK || !strings.Contains(body, "manage groups") || !strings.Contains(body, "Create group") {
+		t.Fatalf("manager groups tab: %d\n%s", status, body)
+	}
+	status, body, _ = b.page(http.MethodGet, "/accounts", nil)
+	if status != http.StatusOK || !strings.Contains(body, "nelly") {
+		t.Fatalf("manager accounts tab: %d\n%s", status, body)
+	}
+
+	// Create a group and add somebody: allowed, and the group shows no
+	// delete or remove buttons.
+	status, body, _ = b.page(http.MethodPost, "/ui/groups", url.Values{"name": {"core"}})
+	if status != http.StatusOK || !strings.Contains(body, ">core<") {
+		t.Fatalf("manager create group: %d\n%s", status, body)
+	}
+	status, body, _ = b.page(http.MethodGet, "/ui/accounts?q=nel&group=core", nil)
+	if status != http.StatusOK || !strings.Contains(body, "/ui/groups/core/members/"+nelly.ID) {
+		t.Fatalf("manager search: %d\n%s", status, body)
+	}
+	status, body, _ = b.page(http.MethodPost, "/ui/groups/core/members/"+nelly.ID, url.Values{})
+	if status != http.StatusOK || !strings.Contains(body, "<strong>nelly</strong>") {
+		t.Fatalf("manager add member: %d\n%s", status, body)
+	}
+	if strings.Contains(body, "/remove") || strings.Contains(body, "delete group") {
+		t.Fatalf("a manager is offered remove or delete:\n%s", body)
+	}
+
+	// identity-admin: readable, but no way to add to it is offered, and
+	// adding anyway is refused.
+	status, body, _ = b.page(http.MethodGet, "/ui/groups/"+store.AdminGroup, nil)
+	if status != http.StatusOK || !strings.Contains(body, "<strong>boss</strong>") || strings.Contains(body, "add a person") || strings.Contains(body, "/remove") {
+		t.Fatalf("manager viewing identity-admin: %d\n%s", status, body)
+	}
+	status, body, _ = b.page(http.MethodGet, "/ui/accounts?q=nel&group="+store.AdminGroup, nil)
+	if status != http.StatusOK || strings.Contains(body, "/ui/groups/"+store.AdminGroup+"/members/") {
+		t.Fatalf("manager offered an add to identity-admin: %d\n%s", status, body)
+	}
+	for _, who := range []string{me.Account, nelly.ID} {
+		status, body, _ = b.page(http.MethodPost, "/ui/groups/"+store.AdminGroup+"/members/"+who, url.Values{})
+		if status != http.StatusForbidden || !strings.Contains(body, "may add to it") {
+			t.Fatalf("manager adding %s to identity-admin: %d\n%s", who, status, body)
+		}
+	}
+
+	// Deleting and removing are refused, whatever the target.
+	for _, path := range []string{
+		"/ui/groups/core/delete",
+		"/ui/groups/" + store.ManagerGroup + "/delete",
+		"/ui/groups/core/members/" + nelly.ID + "/remove",
+		"/ui/groups/" + store.ManagerGroup + "/members/" + me.Account + "/remove",
+		"/ui/groups/" + store.AdminGroup + "/members/" + boss.ID + "/remove",
+	} {
+		status, body, _ = b.page(http.MethodPost, path, url.Values{})
+		if status != http.StatusForbidden || !strings.Contains(body, "requires membership of "+store.AdminGroup) {
+			t.Fatalf("manager %s: %d\n%s", path, status, body)
+		}
+	}
+	if in, _ := server.Store.IsMember(t.Context(), "core", nelly.ID); !in {
+		t.Fatal("a refused remove removed somebody")
+	}
+	if in, _ := server.Store.IsMember(t.Context(), store.AdminGroup, me.Account); in {
+		t.Fatal("a manager became an administrator")
+	}
+
+	// Made an administrator too, the same browser is offered both.
+	if err := server.Store.AddMember(t.Context(), store.AdminGroup, me.Account, "cli"); err != nil {
+		t.Fatal(err)
+	}
+	status, body, _ = b.page(http.MethodGet, "/ui/groups/core", nil)
+	if status != http.StatusOK || !strings.Contains(body, "/ui/groups/core/members/"+nelly.ID+"/remove") || !strings.Contains(body, "delete group") {
+		t.Fatalf("admin group detail: %d\n%s", status, body)
+	}
+}

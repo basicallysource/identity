@@ -37,7 +37,15 @@ itself out. Administration needs an account token; the secure middleware
 refuses application tokens anything past whoami and avatar, so a consumer's
 handoff credential cannot manage groups even for an administrator. The first
 administrator is made with the `identityd grant` command against the database,
-since no API caller can be one before somebody is. Every change is audited in
+since no API caller can be one before somebody is.
+
+`identity-manager` is the role below it, for growing groups without the power
+to shrink them: its members read every group and account, create groups, and
+add members to any group except `identity-admin`, which would otherwise make
+a manager an administrator. Deleting a group and removing a member are
+`identity-admin`'s alone. It is not reserved: it is an ordinary group that
+the code gives a meaning to, made by `identityd grant` like the first
+administrator. Every change is audited in
 the same transaction, with the actor's account id or `cli`.
 
 Reading one group is the one thing a non-account may do. A group reader,

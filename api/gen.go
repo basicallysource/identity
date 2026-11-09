@@ -665,25 +665,25 @@ type ClientInterface interface {
 	// Corresponds with GET /v1/groups/audit (the `GroupAudit` operationId).
 	GroupAudit(ctx context.Context, params *GroupAuditParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// DeleteGroup Delete a group and every membership in it. identity-admin is refused.
+	// DeleteGroup Delete a group and every membership in it. identity-admin only; identity-admin itself is refused.
 	//
 	// Corresponds with DELETE /v1/groups/{name} (the `DeleteGroup` operationId).
 	DeleteGroup(ctx context.Context, name GroupName, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetGroup One group and its members.
 	//
-	// For identity-admin, or a group reader configured for this group. A
+	// For identity-admin, identity-manager, or a group reader configured for this group. A
 	// reader asking for any other group is refused with 403.
 	//
 	// Corresponds with GET /v1/groups/{name} (the `GetGroup` operationId).
 	GetGroup(ctx context.Context, name GroupName, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RemoveMember Take an account out of a group. The last identity-admin is refused.
+	// RemoveMember Take an account out of a group. identity-admin only; the last identity-admin is refused.
 	//
 	// Corresponds with DELETE /v1/groups/{name}/members/{account} (the `RemoveMember` operationId).
 	RemoveMember(ctx context.Context, name GroupName, account AccountID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// AddMember Put an account in a group. Idempotent.
+	// AddMember Put an account in a group. Idempotent. Only identity-admin may add to identity-admin.
 	//
 	// Corresponds with PUT /v1/groups/{name}/members/{account} (the `AddMember` operationId).
 	AddMember(ctx context.Context, name GroupName, account AccountID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1123,7 +1123,7 @@ func (c *Client) GroupAudit(ctx context.Context, params *GroupAuditParams, reqEd
 	return c.Client.Do(req)
 }
 
-// DeleteGroup Delete a group and every membership in it. identity-admin is refused.
+// DeleteGroup Delete a group and every membership in it. identity-admin only; identity-admin itself is refused.
 //
 // Corresponds with DELETE /v1/groups/{name} (the `DeleteGroup` operationId).
 func (c *Client) DeleteGroup(ctx context.Context, name GroupName, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1140,7 +1140,7 @@ func (c *Client) DeleteGroup(ctx context.Context, name GroupName, reqEditors ...
 
 // GetGroup One group and its members.
 //
-// For identity-admin, or a group reader configured for this group. A
+// For identity-admin, identity-manager, or a group reader configured for this group. A
 // reader asking for any other group is refused with 403.
 //
 // Corresponds with GET /v1/groups/{name} (the `GetGroup` operationId).
@@ -1156,7 +1156,7 @@ func (c *Client) GetGroup(ctx context.Context, name GroupName, reqEditors ...Req
 	return c.Client.Do(req)
 }
 
-// RemoveMember Take an account out of a group. The last identity-admin is refused.
+// RemoveMember Take an account out of a group. identity-admin only; the last identity-admin is refused.
 //
 // Corresponds with DELETE /v1/groups/{name}/members/{account} (the `RemoveMember` operationId).
 func (c *Client) RemoveMember(ctx context.Context, name GroupName, account AccountID, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1171,7 +1171,7 @@ func (c *Client) RemoveMember(ctx context.Context, name GroupName, account Accou
 	return c.Client.Do(req)
 }
 
-// AddMember Put an account in a group. Idempotent.
+// AddMember Put an account in a group. Idempotent. Only identity-admin may add to identity-admin.
 //
 // Corresponds with PUT /v1/groups/{name}/members/{account} (the `AddMember` operationId).
 func (c *Client) AddMember(ctx context.Context, name GroupName, account AccountID, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -2565,7 +2565,7 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /v1/groups/audit (the `GroupAudit` operationId).
 	GroupAuditWithResponse(ctx context.Context, params *GroupAuditParams, reqEditors ...RequestEditorFn) (*GroupAuditResponse, error)
 
-	// DeleteGroupWithResponse Delete a group and every membership in it. identity-admin is refused.
+	// DeleteGroupWithResponse Delete a group and every membership in it. identity-admin only; identity-admin itself is refused.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -2574,7 +2574,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetGroupWithResponse One group and its members.
 	//
-	// For identity-admin, or a group reader configured for this group. A
+	// For identity-admin, identity-manager, or a group reader configured for this group. A
 	// reader asking for any other group is refused with 403.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -2582,14 +2582,14 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /v1/groups/{name} (the `GetGroup` operationId).
 	GetGroupWithResponse(ctx context.Context, name GroupName, reqEditors ...RequestEditorFn) (*GetGroupResponse, error)
 
-	// RemoveMemberWithResponse Take an account out of a group. The last identity-admin is refused.
+	// RemoveMemberWithResponse Take an account out of a group. identity-admin only; the last identity-admin is refused.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with DELETE /v1/groups/{name}/members/{account} (the `RemoveMember` operationId).
 	RemoveMemberWithResponse(ctx context.Context, name GroupName, account AccountID, reqEditors ...RequestEditorFn) (*RemoveMemberResponse, error)
 
-	// AddMemberWithResponse Put an account in a group. Idempotent.
+	// AddMemberWithResponse Put an account in a group. Idempotent. Only identity-admin may add to identity-admin.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -4622,7 +4622,7 @@ func (c *ClientWithResponses) GroupAuditWithResponse(ctx context.Context, params
 	return ParseGroupAuditResponse(rsp)
 }
 
-// DeleteGroupWithResponse Delete a group and every membership in it. identity-admin is refused.
+// DeleteGroupWithResponse Delete a group and every membership in it. identity-admin only; identity-admin itself is refused.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -4637,7 +4637,7 @@ func (c *ClientWithResponses) DeleteGroupWithResponse(ctx context.Context, name 
 
 // GetGroupWithResponse One group and its members.
 //
-// For identity-admin, or a group reader configured for this group. A
+// For identity-admin, identity-manager, or a group reader configured for this group. A
 // reader asking for any other group is refused with 403.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -4651,7 +4651,7 @@ func (c *ClientWithResponses) GetGroupWithResponse(ctx context.Context, name Gro
 	return ParseGetGroupResponse(rsp)
 }
 
-// RemoveMemberWithResponse Take an account out of a group. The last identity-admin is refused.
+// RemoveMemberWithResponse Take an account out of a group. identity-admin only; the last identity-admin is refused.
 //
 // Returns a wrapper object for the known response body format(s).
 //
@@ -4664,7 +4664,7 @@ func (c *ClientWithResponses) RemoveMemberWithResponse(ctx context.Context, name
 	return ParseRemoveMemberResponse(rsp)
 }
 
-// AddMemberWithResponse Put an account in a group. Idempotent.
+// AddMemberWithResponse Put an account in a group. Idempotent. Only identity-admin may add to identity-admin.
 //
 // Returns a wrapper object for the known response body format(s).
 //

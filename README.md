@@ -77,6 +77,14 @@ API before somebody is:
 
     identityd grant identity-admin <handle-or-account-id>
 
+`identity-manager` is the step below: its members see the groups and
+accounts tabs, create groups and add people to any group but
+`identity-admin`. Deleting a group and removing a member stay with
+`identity-admin`. It is made the same way, the first time somebody is
+granted it:
+
+    identityd grant identity-manager <handle-or-account-id>
+
 Also `identityd accounts`, `identityd groups`, `identityd create <group>
 [description]`, `identityd revoke`. Every
 change, from the page or the terminal, is in the audit log.
@@ -145,8 +153,8 @@ that sign-in, this one included.
 
 The page at `/` does it: sign in with GitHub (device flow, works from a
 terminal too) or Discord (redirect), link the other provider, choose a
-profile photo, mint and revoke tokens, and, for `identity-admin`, manage
-groups. It is server-rendered HTML with htmx; there is no token in the
+profile photo, mint and revoke tokens, and, for `identity-admin` and `identity-manager`,
+manage groups. It is server-rendered HTML with htmx; there is no token in the
 browser. Signing out here, or revoking a browser's session from the token
 list, signs that browser out of every service it reached from it.
 

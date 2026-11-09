@@ -53,7 +53,7 @@
 {{template "error" .}}
 <p>Signed in as <strong>{{.Me.Handle}}</strong> <span class="font-mono text-sm text-neutral-500">({{.Me.Account}})</span></p>
 
-{{if .Admin}}
+{{if .Manage}}
 <nav class="tabs" aria-label="Tabs">
   <a class="tab{{if eq .Tab "me"}} active{{end}}" href="/">me</a>
   <a class="tab{{if eq .Tab "groups"}} active{{end}}" href="/groups">groups</a>
@@ -174,20 +174,20 @@
   {{template "error" .}}
   <div class="flex items-baseline justify-between gap-4">
     <h3 class="font-mono text-lg font-medium">{{.Group.Name}}</h3>
-    {{if ne .Group.Name "identity-admin"}}<button class="btn-danger" hx-post="/ui/groups/{{.Group.Name}}/delete" hx-target="#groups" hx-confirm="Delete {{.Group.Name}} and every membership in it?">delete group</button>{{end}}
+    {{if and .Admin (ne .Group.Name "identity-admin")}}<button class="btn-danger" hx-post="/ui/groups/{{.Group.Name}}/delete" hx-target="#groups" hx-confirm="Delete {{.Group.Name}} and every membership in it?">delete group</button>{{end}}
   </div>
   {{if .Group.Description}}<p class="text-sm text-neutral-500">{{.Group.Description}}</p>{{end}}
   <ul class="flex flex-col gap-1">
     {{range .Group.Members}}<li class="flex items-center justify-between gap-4">
       <span><strong>{{.Handle}}</strong> <span class="font-mono text-xs text-neutral-500">{{.Account}}</span> <span class="text-xs text-neutral-500">added {{ago .AddedAt}} by {{.AddedBy}}</span></span>
-      <button class="btn-danger" hx-post="/ui/groups/{{$.Group.Name}}/members/{{.Account}}/remove" hx-target="#group-detail">remove</button>
+      {{if $.Admin}}<button class="btn-danger" hx-post="/ui/groups/{{$.Group.Name}}/members/{{.Account}}/remove" hx-target="#group-detail">remove</button>{{end}}
     </li>{{else}}<li class="text-sm text-neutral-500">Nobody yet.</li>{{end}}
   </ul>
-  <div class="stack">
+  {{if or .Admin (ne .Group.Name "identity-admin")}}<div class="stack">
     <input class="input" type="search" name="q" placeholder="add a person by handle" autocomplete="off"
       hx-get="/ui/accounts" hx-vals='{"group":"{{.Group.Name}}"}' hx-trigger="input changed delay:250ms, search" hx-target="#search-results">
     <div id="search-results"></div>
-  </div>
+  </div>{{end}}
 </div>
 {{end}}
 
@@ -228,7 +228,7 @@
   {{range .Accounts}}<li class="flex items-center justify-between gap-4 px-3 py-2">
     <span><strong>{{.Handle}}</strong> <span class="font-mono text-xs text-neutral-500">{{.Account}}</span>
       {{range .Identities}}<span class="ml-2 inline-flex items-center gap-1 text-xs text-neutral-500">{{if eq .Provider "github"}}{{template "icon-github"}}{{else}}{{template "icon-discord"}}{{end}}{{.Handle}}</span>{{end}}</span>
-    {{if has .Groups $group}}<span class="text-xs text-neutral-500">already in</span>{{else}}<button class="btn" hx-post="/ui/groups/{{$group}}/members/{{.Account}}" hx-target="#group-detail">add</button>{{end}}
+    {{if has .Groups $group}}<span class="text-xs text-neutral-500">already in</span>{{else if and (eq $group "identity-admin") (not $.Admin)}}{{else}}<button class="btn" hx-post="/ui/groups/{{$group}}/members/{{.Account}}" hx-target="#group-detail">add</button>{{end}}
   </li>{{else}}<li class="px-3 py-2 text-sm text-neutral-500">No accounts match.</li>{{end}}
 </ul>
 {{end}}
